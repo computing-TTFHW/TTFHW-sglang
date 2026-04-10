@@ -22,7 +22,17 @@ sglang 自动化编译、镜像制作仓库。
 | `DEVICE_TYPE` | 目标设备类型 | Matrix 自动构建 | `a3`, `910b` |
 | `SGLANG_KERNEL_NPU_TAG` | NPU Kernel 镜像标签 | 固定值 | `2026.04.15.rc2` |
 
-## 使用方法
+## 工作流程
+
+本仓库使用 GitHub Actions 自动化构建流程：
+
+1. **拉取源码**: 从 sglang 主社区仓库拉取最新代码
+2. **设置 QEMU**: 使用 `docker/setup-qemu-action@v3` 支持多架构构建
+3. **构建镜像**: 使用 `docker/build-push-action@v6` 构建并推送多架构镜像
+4. **参数传递**: 
+   - `image_tag` 通过手动输入
+   - `CANN_VERSION` 和 `DEVICE_TYPE` 通过 matrix 策略自动构建所有组合
+   - `SGLANG_KERNEL_NPU_TAG` 为固定值 `2026.04.15.rc2`
 
 ### 前置条件
 
