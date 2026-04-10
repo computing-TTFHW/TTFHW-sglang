@@ -10,7 +10,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.actor }}/sglang_npu
 
 jobs:
   build-npu-image:
@@ -49,6 +48,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set image name (lowercase)
+        id: image
+        run: |
+          echo "owner_lower=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          echo "repo_lower=$(echo ${{ github.event.repository.name }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
@@ -57,7 +62,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           provenance: false
-          tags: ${{ matrix.CANN_VERSION }}-${{ matrix.DEVICE_TYPE }}-${{ inputs.image_tag }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.image.outputs.owner_lower }}/sglang_npu:${{ matrix.CANN_VERSION }}-${{ matrix.DEVICE_TYPE }}-${{ inputs.image_tag }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -67,4 +73,3 @@ jobs:
             SGLANG_KERNEL_NPU_TAG=2026.04.15.rc2
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=false
