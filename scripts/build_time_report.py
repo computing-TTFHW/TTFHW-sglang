@@ -443,10 +443,10 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                                     raw_log = log_file.read().decode('utf-8', errors='ignore')
                                     log_content = strip_ansi(raw_log)
 
-                                    # Save full log for debugging
-                                    safe_job_name = job_name.replace('/', '-').replace(' ', '_').replace('(', '').replace(')', '')
-                                    full_log_path = f'logs/full-{safe_job_name}-{log_filename.replace("/", "_")}'
-                                    os.makedirs(os.path.dirname(full_log_path), exist_ok=True)
+                                    # Save full log for debugging using original filename
+                                    log_dir = f'logs'
+                                    os.makedirs(log_dir, exist_ok=True)
+                                    full_log_path = f'{log_dir}/{log_filename.replace("/", "_")}'
                                     with open(full_log_path, 'w', encoding='utf-8') as f:
                                         f.write(log_content)
                                     print(f"      Saved full log to {full_log_path}")
