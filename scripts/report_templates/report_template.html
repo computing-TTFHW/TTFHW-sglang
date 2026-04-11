@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Build Report - {{WORKFLOW_NAME}}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 20px;
+            line-height: 1.5;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { color: #58a6ff; margin-bottom: 10px; }
+        h2 { color: #7ee787; margin: 30px 0 15px; padding-bottom: 10px; border-bottom: 1px solid #30363d; }
+        h3 { color: #79c0ff; margin: 20px 0 10px; }
+        a { color: #58a6ff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            background: #161b22;
+            padding: 20px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+        .info-item {
+            background: #0d1117;
+            padding: 12px 15px;
+            border-radius: 6px;
+            border: 1px solid #30363d;
+        }
+        .info-label { color: #8b949e; font-size: 12px; text-transform: uppercase; }
+        .info-value { color: #c9d1d9; font-weight: 600; margin-top: 4px; word-break: break-all; }
+
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        .summary-card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+        }
+        .summary-card.success { border-color: #238636; }
+        .summary-card.failure { border-color: #da3633; }
+        .summary-number { font-size: 36px; font-weight: 700; color: #f0f6fc; }
+        .summary-card.success .summary-number { color: #238636; }
+        .summary-card.failure .summary-number { color: #da3633; }
+        .summary-label { color: #8b949e; margin-top: 5px; }
+
+        .job-card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .job-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #30363d;
+        }
+        .job-name { font-size: 20px; font-weight: 600; color: #58a6ff; }
+        .job-meta { display: flex; gap: 15px; align-items: center; flex-wrap: wrap; }
+        .job-status {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .status-success { background: #238636; color: #fff; }
+        .status-failure { background: #da3633; color: #fff; }
+        .status-in_progress { background: #d29922; color: #fff; }
+        .status-pending { background: #6e7681; color: #fff; }
+
+        .duration-badge {
+            background: #1f6feb26;
+            color: #7ee787;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .steps-section { margin-top: 15px; }
+        .steps-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        .steps-table th, .steps-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #30363d;
+        }
+        .steps-table th {
+            color: #8b949e;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 12px;
+        }
+        .steps-table tr:hover { background: #0d1117; }
+        .step-name { font-family: 'SF Mono', Monaco, monospace; font-size: 13px; color: #f0f6fc; }
+        .step-duration { font-weight: 600; color: #7ee787; }
+
+        .stages-section { margin-top: 20px; }
+        .stage-card {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 10px;
+        }
+        .stage-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .stage-id {
+            background: #1f6feb;
+            color: #f0f6fc;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .stage-duration {
+            font-size: 16px;
+            font-weight: 700;
+            color: #7ee787;
+        }
+        .stage-command {
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 12px;
+            color: #8b949e;
+            background: #161b22;
+            padding: 8px 12px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .stage-info {
+            color: #58a6ff;
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+
+        .slowest-stages {
+            background: #161b22;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+        .slowest-item {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            padding: 10px 0;
+            border-bottom: 1px solid #30363d;
+        }
+        .slowest-item:last-child { border-bottom: none; }
+        .slowest-rank {
+            width: 30px;
+            height: 30px;
+            background: #d29922;
+            color: #0d1117;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+        .slowest-details { flex: 1; }
+        .slowest-stage { color: #f0f6fc; font-family: monospace; }
+        .slowest-job { color: #8b949e; font-size: 12px; }
+        .slowest-duration {
+            font-size: 18px;
+            font-weight: 700;
+            color: #f0f6fc;
+            min-width: 80px;
+            text-align: right;
+        }
+
+        .footer {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #30363d;
+            color: #8b949e;
+            text-align: center;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Build Report: {{WORKFLOW_NAME}}</h1>
+        <p style="color: #8b949e; margin-bottom: 20px;">
+            <a href="{{WORKFLOW_RUN_URL}}" target="_blank">View Workflow Run</a>
+        </p>
+
+        <div class="info-grid">
+            <div class="info-item">
+                <div class="info-label">Run ID</div>
+                <div class="info-value">{{RUN_ID}}</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Trigger</div>
+                <div class="info-value">{{TRIGGER}}</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Branch</div>
+                <div class="info-value">{{BRANCH}}</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Commit</div>
+                <div class="info-value">{{COMMIT}}</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Created At</div>
+                <div class="info-value">{{CREATED_AT}}</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Updated At</div>
+                <div class="info-value">{{UPDATED_AT}}</div>
+            </div>
+        </div>
+
+        <div class="summary-cards">
+            <div class="summary-card success">
+                <div class="summary-number">{{SUCCESSFUL_JOBS}}</div>
+                <div class="summary-label">Successful Jobs</div>
+            </div>
+            <div class="summary-card failure">
+                <div class="summary-number">{{FAILED_JOBS}}</div>
+                <div class="summary-label">Failed Jobs</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-number">{{TOTAL_DOCKERFILE_STAGES}}</div>
+                <div class="summary-label">Dockerfile Stages</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-number">{{TOTAL_JOBS}}</div>
+                <div class="summary-label">Total Jobs</div>
+            </div>
+        </div>
+
+        <h2>Build Jobs</h2>
+
+        {{JOBS_CONTENT}}
+
+        <h2>Top 10 Slowest Dockerfile Stages</h2>
+        <div class="slowest-stages">
+            {{SLOWEST_STAGES_CONTENT}}
+        </div>
+
+        <div class="footer">
+            <p>Generated by GitHub Actions Build Report Generator</p>
+        </div>
+    </div>
+</body>
+</html>

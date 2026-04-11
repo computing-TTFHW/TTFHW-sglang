@@ -24,7 +24,9 @@ sglang 自动化编译、镜像制作仓库。
 
 ## 工作流程
 
-本仓库使用 GitHub Actions 自动化构建流程：
+### 主工作流 (build-npu-image.yml)
+
+主工作流负责构建和推送 Docker 镜像：
 
 1. **拉取源码**: 从 sglang 主社区仓库拉取最新代码
 2. **设置 QEMU**: 使用 `docker/setup-qemu-action@v3` 支持多架构构建
@@ -33,6 +35,85 @@ sglang 自动化编译、镜像制作仓库。
    - `image_tag` 通过手动输入
    - `CANN_VERSION` 和 `DEVICE_TYPE` 通过 matrix 策略自动构建所有组合
    - `SGLANG_KERNEL_NPU_TAG` 为固定值 `2026.04.15.rc2`
+
+### 构建报告工作流 (generate-build-report.yml)
+
+可复用的工作流，用于生成构建时间统计报告：
+
+- 可独立运行，分析任意已完成的 workflow run
+- 可被其他工作流通过 `workflow_call` 触发
+
+报告内容：
+- Workflow 各 step 的执行时间
+- Dockerfile 各构建阶段的耗时
+- Top 10 最慢构建阶段
+
+### 工作流关系
+
+```
+build-npu-image.yml
+    ├── build-npu-image (job) - 构建镜像
+    ├── generate-report (job) - 调用可复用工作流生成报告
+    └── summary (job) - 生成构建摘要
+```
+
+## 构建时间统计
+
+### 报告文件
+
+构建完成后会生成两个报告文件，作为 Artifact 可供下载：
+
+| 文件 | 格式 | 说明 |
+|------|------|------|
+| `build-report.json` | JSON | 包含完整的构建时间数据，可供程序化处理 |
+| `build-report.html` | HTML | 可视化报告，包含摘要卡片、步骤时间表、Dockerfile 阶段分析等 |
+
+### 查看构建报告
+
+1. 构建完成后，进入 Actions 页面
+2. 点击对应的 workflow 运行记录
+3. 滚动到页面底部 "Artifacts" 区域
+4. 下载 `sglang-npu-build-reports` 压缩包
+5. 解压后打开 `build-report.html` 查看可视化报告
+
+### HTML 报告内容
+
+- **摘要卡片**: 成功/失败的 Job 数量、Dockerfile 阶段数量
+- **Workflow 信息**: 触发方式、分支、Commit、时间等
+- **Job 详情**: 每个 job 的状态、总耗时
+- **Workflow Steps**: 每个 step 的名称、状态、耗时、开始时间
+- **Dockerfile 阶段**: 每个构建阶段的详细信息和耗时
+- **Top 10 最慢阶段**: 按耗时排序的最慢构建阶段
+
+### 独立使用构建报告工作流
+
+你可以通过以下方式独立运行构建报告工作流：
+
+#### 方式 1: 手动触发
+
+```bash
+# 进入 GitHub Actions 页面
+# 选择 "Generate Build Report" 工作流
+# 点击 "Run workflow"
+# 输入要分析的 workflow run ID
+```
+
+#### 方式 2: 在其他工作流中调用
+
+```yaml
+jobs:
+  my-build-job:
+    # ... 你的构建步骤 ...
+
+  generate-report:
+    needs: my-build-job
+    uses: ./.github/workflows/generate-build-report.yml
+    with:
+      output_artifact_name: 'my-build-reports'
+      retention_days: 30
+```
+
+## 使用方法
 
 ### 前置条件
 
@@ -118,6 +199,20 @@ docker pull ghcr.io/<owner>/sglang_npu:8.5.0-910b-B001
 | 2 | 8.5.0 | 910b | `8.5.0-910b-<image_tag>` |
 
 > 注：`SGLANG_KERNEL_NPU_TAG` 为固定值 `2026.04.15.rc2`，作为 Docker build-args 传入，不影响镜像标签。
+
+## 文件结构
+
+```
+.
+├── scripts/
+│   ├── build_time_report.py          # 构建报告生成 Python 脚本
+│   └── report_templates/
+│       └── report_template.html      # HTML 报告模板
+└── .github/
+    └── workflows/
+        ├── build-npu-image.yml         # 主构建工作流
+        └── generate-build-report.yml   # 可复用的报告生成工作流
+```
 
 ## 许可证
 
