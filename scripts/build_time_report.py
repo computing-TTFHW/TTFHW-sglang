@@ -632,10 +632,15 @@ def generate_html_report(report, output_dir='.'):
             job_html += f'''
             <div class="stages-section">
                 <h3>Log Files Found in Workflow Zip ({len(log_files)} files)</h3>
-                <ul style="font-family: monospace; font-size: 12px; color: #8b949e;">
+                <p style="font-size: 12px; color: #8b949e; margin-bottom: 10px;">
+                    These log files are saved to <code style="background: #161b22; padding: 2px 6px; border-radius: 4px;">logs/full-*.txt</code> for debugging
+                </p>
+                <ul style="font-family: monospace; font-size: 11px; color: #8b949e;">
             '''
             for lf in log_files[:30]:  # Show max 30 files
-                job_html += f'<li>{lf}</li>'
+                # Escape special HTML characters
+                lf_escaped = lf.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                job_html += f'<li>{lf_escaped}</li>'
             if len(log_files) > 30:
                 job_html += f'<li>... and {len(log_files) - 30} more</li>'
             job_html += '''
