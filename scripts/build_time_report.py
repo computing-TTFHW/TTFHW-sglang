@@ -56,45 +56,33 @@ def parse_dockerfile_log(log_content):
     """
     Parse Buildkit log to extract Dockerfile stage timings.
 
-    Extracts timing for each Dockerfile layer including:
-    - FROM: Base image pull
-    - RUN: Command execution
-    - COPY/ADD: File operations
-    - ENV/ARG/LABEL: Metadata operations
-    - WORKDIR: Directory operations
-    - EXPOSE/CMD/ENTRYPOINT: Container configuration
+    Actual BuildKit log format from GitHub Actions:
+    #6 [linux/amd64 1/12] FROM quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11@sha256:...
+    #6 resolve quay.io/ascend/cann:... done
+    #6 sha256:xxx 1.90kB / 1.90kB 0.1s done
+    #6 0.123 Getting: http://...
+    #6 DONE 15.5s
 
-    Buildkit log format:
-    #1 [internal] load build definition from Dockerfile
-    #1 DONE 0.5s
-
-    #2 [linux/amd64 internal] load metadata for ...
-    #2 DONE 1.2s
-
-    #3 [1/8] FROM docker.io/python:3.11-slim
-    #3 DONE 10.5s
-
-    #4 [2/8] RUN apt-get update
-    #4 0.123 Getting: http://...
-    #4 1.234 Get:1 http://...
-    #4 DONE 15.5s
+    Or with timestamp prefix:
+    Fri, 10 Apr 2026 09:06:47 GMT
+    #6 [linux/amd64 1/12] FROM ...
     """
     stages = []
-    stage_starts = {}
+    stage_data = {}  # stage_num -> {stage_info, command, instruction_type, instruction_detail}
     completed_stages = set()
 
-    # Pattern for buildkit stage start: #N [...] command
-    # Matches lines like:
-    #   #1 [internal] load build definition from Dockerfile
-    #   #2 [linux/amd64 internal] load metadata for ...
-    #   #3 [1/8] FROM docker.io/python:3.11-slim
-    #   #3 [2/8] RUN apt-get update
+    # Pattern for stage start: #N [...] command
+    # Matches: #6 [linux/amd64 1/12] FROM quay.io/...
+    # Also matches with timestamp prefix: Fri, 10 Apr 2026 09:06:47 GMT
     stage_pattern = r'^#(\d+)\s+\[([^\]]*)\]\s*(.+)'
 
-    # Pattern for DONE line: #N DONE 1.234s
-    done_pattern = r'^#(\d+)\s+DONE\s+(\d+\.\d+s)'
+    # Pattern for completion with time: #N ... X.Xs done  OR  #N DONE X.Xs
+    # Matches: #6 sha256:xxx 29.36MB / 3.77GB 0.2s done
+    # Matches: #6 DONE 15.5s
+    done_pattern = r'^#(\d+)\s+.*?\s+DONE\s+(\d+\.\d+s)'
+    done_pattern2 = r'^#(\d+)\s+.*?(\d+\.\d+s)\s+done\s*$'
 
-    # Pattern to identify Dockerfile instruction type from stage info like [1/8] FROM ...
+    # Pattern to identify Dockerfile instruction type
     dockerfile_instructions = {
         'FROM': r'^FROM\s+',
         'RUN': r'^RUN\s+',
@@ -120,25 +108,37 @@ def parse_dockerfile_log(log_content):
         if not line:
             continue
 
-        # Check for DONE first (must happen after stage start)
-        done_match = re.search(done_pattern, line)
+        # Skip timestamp lines like "Fri, 10 Apr 2026 09:06:47 GMT"
+        if line.startswith('Mon,') or line.startswith('Tue,') or line.startswith('Wed,') or \
+           line.startswith('Thu,') or line.startswith('Fri,') or line.startswith('Sat,') or \
+           line.startswith('Sun,'):
+            continue
+
+        # Check for DONE with explicit time (higher priority)
+        done_match = re.search(done_pattern, line, re.IGNORECASE)
         if done_match:
             stage_num = done_match.group(1)
             duration_str = done_match.group(2)
             duration_sec = float(duration_str.replace('s', ''))
 
-            if stage_num in stage_starts and stage_num not in completed_stages:
-                stage_data = stage_starts[stage_num]
-                stages.append({
-                    'stage_id': f"#{stage_num}",
-                    'stage_info': stage_data['stage_info'],
-                    'command': stage_data['command'],
-                    'instruction_type': stage_data['instruction_type'],
-                    'instruction_detail': stage_data['instruction_detail'],
-                    'duration': duration_sec,
-                    'duration_formatted': format_duration(duration_sec)
-                })
+            if stage_num in stage_data and stage_num not in completed_stages:
+                stage_data[stage_num]['duration'] = duration_sec
+                stage_data[stage_num]['duration_formatted'] = format_duration(duration_sec)
                 completed_stages.add(stage_num)
+            continue
+
+        # Check for "done" at end with time before it
+        done_match2 = re.search(done_pattern2, line, re.IGNORECASE)
+        if done_match2 and stage_num not in completed_stages:
+            stage_num = done_match2.group(1)
+            duration_str = done_match2.group(2)
+            duration_sec = float(duration_str.replace('s', ''))
+
+            if stage_num in stage_data:
+                # Only update if this is the first duration or a longer duration (the final one)
+                if 'duration' not in stage_data[stage_num] or duration_sec > stage_data[stage_num].get('duration', 0):
+                    stage_data[stage_num]['duration'] = duration_sec
+                    stage_data[stage_num]['duration_formatted'] = format_duration(duration_sec)
             continue
 
         # Check for stage start with [...] bracket
@@ -148,53 +148,50 @@ def parse_dockerfile_log(log_content):
             stage_info = stage_match.group(2).strip()
             stage_cmd = stage_match.group(3).strip()
 
-            # Skip if we already have a DONE for this stage
+            # Skip if this is a sub-line of an existing stage (e.g., "#6 sha256:...")
             if stage_num in completed_stages:
                 continue
 
-            # Skip if this is a continuation line (starts with stage_num followed by space and number)
-            # e.g., "#3 0.123 resolve ..." - this is a sub-line, not a new stage
-            if re.match(r'^#\d+\s+\d+\.\d+', line):
+            # Skip if this looks like a progress line, not a new stage
+            if 'sha256:' in stage_info.lower() or stage_info.lower().startswith('resolve'):
                 continue
 
-            # Identify Dockerfile instruction type from stage_info
-            # stage_info might be like "1/8" or "linux/amd64 internal" or "2/8] FROM ..."
+            # Identify Dockerfile instruction type
             instruction_type = 'OTHER'
             instruction_detail = stage_cmd[:150]
 
-            # Check if stage_info contains instruction like [2/8] RUN ...
             for instr_type, pattern in dockerfile_instructions.items():
-                # Check in stage_info (e.g., "2/8] FROM docker.io/...")
-                if re.search(pattern, stage_info, re.IGNORECASE):
+                if re.search(pattern, stage_cmd, re.IGNORECASE):
                     instruction_type = instr_type
-                    match = re.search(pattern + r'(\S+)?', stage_info, re.IGNORECASE)
+                    match = re.search(pattern + r'(\S+)?', stage_cmd, re.IGNORECASE)
                     if match and match.group(1):
                         instruction_detail = match.group(1)[:150]
                     else:
-                        instruction_detail = stage_info[:150]
+                        instruction_detail = stage_cmd[:150]
                     break
 
-            # Also check stage_cmd if no instruction found
-            if instruction_type == 'OTHER':
-                for instr_type, pattern in dockerfile_instructions.items():
-                    if re.search(pattern, stage_cmd, re.IGNORECASE):
-                        instruction_type = instr_type
-                        instruction_detail = stage_cmd[:150]
-                        break
-
-            # Handle special cases
+            # Handle internal operations
             if 'internal' in stage_info.lower():
                 instruction_type = 'INTERNAL'
                 instruction_detail = stage_info
 
-            stage_starts[stage_num] = {
+            # Store stage data (will be finalized when DONE is found)
+            stage_data[stage_num] = {
+                'stage_id': f"#{stage_num}",
                 'stage_info': stage_info,
                 'command': stage_cmd[:150],
                 'instruction_type': instruction_type,
-                'instruction_detail': instruction_detail
+                'instruction_detail': instruction_detail,
+                'duration': None,
+                'duration_formatted': 'N/A'
             }
 
-    print(f"    Found {len(stages)} completed Dockerfile stages")
+    # Convert stage_data dict to list, only including completed stages with timing
+    for stage_num in sorted(stage_data.keys(), key=int):
+        if stage_num in completed_stages and stage_data[stage_num].get('duration') is not None:
+            stages.append(stage_data[stage_num])
+
+    print(f"    Found {len(stages)} completed Dockerfile stages with timing")
     return stages
 
 
