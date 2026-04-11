@@ -330,10 +330,11 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                     job_info['steps'].append(step_info)
 
         # Get job logs for Dockerfile parsing
-        # GitHub returns workflow logs as a zip file with separate log files per job
+        # GitHub returns workflow logs as a zip file with separate log files per job/step
         if job.get('status') == 'completed':
             job_name = job.get('name', 'Unknown')
-            print(f"  Looking for Docker build output in job '{job_name}'...")
+            job_id = job.get('id')
+            print(f"  Looking for Docker build output in job '{job_name}' (ID: {job_id})...")
 
             if run_id:
                 # Download workflow run logs (returns a zip file)
@@ -342,67 +343,98 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
 
                 if workflow_log_resp.status_code == 200:
                     try:
-                        # GitHub returns a zip file containing log files for each job
+                        # GitHub returns a zip file containing log files for each step of each job
                         log_zip = zipfile.ZipFile(io.BytesIO(workflow_log_resp.content))
 
-                        # Find the log file for this job
-                        # Job log filenames follow the pattern: {job_name}/{step_number}_{step_name}.txt
-                        job_name_safe = job.get('name', 'Unknown').replace(' ', '_')
-                        log_filename = None
+                        # List all files in zip for debugging
+                        print(f"    Zip contains {len(log_zip.namelist())} files:")
+                        all_log_files = log_zip.namelist()
+                        for name in all_log_files[:20]:  # Show first 20
+                            print(f"      - {name}")
+                        if len(all_log_files) > 20:
+                            print(f"      ... and {len(all_log_files) - 20} more")
+
+                        # Store all log file names for this job in job_info
+                        job_info['log_files'] = all_log_files
+
+                        # Find log files for this job by job ID
+                        # GitHub log file naming pattern: {job_name}_{job_id}/{step_number}_{step_name}.txt
+                        job_id_str = str(job_id)
+                        target_files = []
+                        found_log_files = []  # Store found log files for this job
 
                         for name in log_zip.namelist():
-                            # Match job name in the path
-                            if name.startswith(job_name_safe + '/') or '/' + job_name_safe in name:
-                                log_filename = name
-                                break
+                            # Match by job ID in the path
+                            if f'_{job_id_str}/' in name or name.startswith(f'{job_name}_'):
+                                target_files.append(name)
+                                found_log_files.append(name)
 
-                        # If not found by name, try to find by pattern
-                        if not log_filename:
+                        # If not found by job ID, try matching by job name
+                        if not target_files:
+                            job_name_safe = job_name.replace(' ', '_').replace('-', '_')
                             for name in log_zip.namelist():
-                                if job.get('name', '').replace(' ', '').lower() in name.lower():
-                                    log_filename = name
-                                    break
+                                if name.startswith(job_name_safe + '_') or '/' + job_name_safe + '_' in name:
+                                    target_files.append(name)
+                                    found_log_files.append(name)
 
-                        # If still not found, use the first log file that looks like a build log
-                        if not log_filename and log_zip.namelist():
+                        # If still not found, look for files containing "build" or "docker"
+                        if not target_files:
                             for name in log_zip.namelist():
-                                if name.endswith('.txt') and 'build' in name.lower():
-                                    log_filename = name
-                                    break
+                                lower_name = name.lower()
+                                if ('build' in lower_name or 'docker' in lower_name) and name.endswith('.txt'):
+                                    target_files.append(name)
+                                    found_log_files.append(name)
 
-                        # Last resort: use first file
-                        if not log_filename and log_zip.namelist():
-                            log_filename = log_zip.namelist()[0]
+                        # Last resort: try all .txt files
+                        if not target_files:
+                            target_files = [n for n in log_zip.namelist() if n.endswith('.txt')]
+                            found_log_files = target_files[:5]  # Limit to first 5
 
-                        if log_filename:
-                            print(f"    Found log file: {log_filename}")
-                            with log_zip.open(log_filename) as log_file:
-                                raw_log = log_file.read().decode('utf-8', errors='ignore')
-                                log_content = strip_ansi(raw_log)
+                        print(f"    Found {len(target_files)} potential log files for this job")
 
-                                # Check for BuildKit output
-                                has_buildkit = '#[' in log_content or '# DONE' in log_content or 'DOCKER_BUILDKIT' in log_content
+                        # Store found log files in job_info for HTML display
+                        job_info['found_log_files'] = found_log_files
 
-                                if has_buildkit:
-                                    print(f"    Found BuildKit output ({len(log_content)} bytes)")
-                                    dockerfile_stages = parse_dockerfile_log(log_content)
-                                    job_info['dockerfile_stages'] = dockerfile_stages
-                                    print(f"    Found {len(dockerfile_stages)} Dockerfile stages")
-                                else:
-                                    print(f"    No BuildKit output found in this log file")
+                        # Parse each log file and look for BuildKit output
+                        dockerfile_stages = []
+                        for log_filename in target_files:
+                            print(f"    Trying log file: {log_filename}")
+                            try:
+                                with log_zip.open(log_filename) as log_file:
+                                    raw_log = log_file.read().decode('utf-8', errors='ignore')
+                                    log_content = strip_ansi(raw_log)
 
-                                # Save log for debugging
-                                safe_job_name = job.get('name', 'Unknown').replace('/', '-').replace(' ', '_')
-                                log_file_path = f'logs/workflow-{safe_job_name}-{job.get("id", "unknown")}.log'
-                                os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
-                                with open(log_file_path, 'w', encoding='utf-8') as f:
-                                    f.write(log_content)
-                                print(f"    Log saved to {log_file_path}")
+                                    # Check for BuildKit output
+                                    has_buildkit = '#[' in log_content or '# DONE' in log_content
+
+                                    if has_buildkit:
+                                        print(f"      Found BuildKit output in this file ({len(log_content)} bytes)")
+                                        stages = parse_dockerfile_log(log_content)
+                                        if stages:
+                                            print(f"      Parsed {len(stages)} Dockerfile stages")
+                                            dockerfile_stages.extend(stages)
+                                    else:
+                                        print(f"      No BuildKit output in this file")
+                            except Exception as e:
+                                print(f"      Error parsing {log_filename}: {e}")
+
+                        if dockerfile_stages:
+                            job_info['dockerfile_stages'] = dockerfile_stages
+                            print(f"  Total: Found {len(dockerfile_stages)} Dockerfile stages for this job")
+
+                            # Save parsed stages for debugging
+                            safe_job_name = job_name.replace('/', '-').replace(' ', '_')
+                            stages_file = f'logs/stages-{safe_job_name}.json'
+                            with open(stages_file, 'w') as f:
+                                json.dump(dockerfile_stages, f, indent=2, ensure_ascii=False)
+                            print(f"    Stages saved to {stages_file}")
                         else:
-                            print(f"    Could not find log file in workflow zip")
+                            print(f"    No Dockerfile stages found in any log file for this job")
 
                     except zipfile.BadZipfile:
                         print(f"    Response is not a valid zip file")
+                        import traceback
+                        traceback.print_exc()
                     except Exception as e:
                         print(f"    Error processing workflow logs: {e}")
                         import traceback
@@ -530,6 +562,23 @@ def generate_html_report(report, output_dir='.'):
                 </table>
             </div>
         '''
+
+        # Show log files found in the zip
+        log_files = job.get('found_log_files', [])
+        if log_files:
+            job_html += f'''
+            <div class="stages-section">
+                <h3>Log Files Found in Workflow Zip ({len(log_files)} files)</h3>
+                <ul style="font-family: monospace; font-size: 12px; color: #8b949e;">
+            '''
+            for lf in log_files[:30]:  # Show max 30 files
+                job_html += f'<li>{lf}</li>'
+            if len(log_files) > 30:
+                job_html += f'<li>... and {len(log_files) - 30} more</li>'
+            job_html += '''
+                </ul>
+            </div>
+            '''
 
         # Dockerfile Stages
         dockerfile_stages = job.get('dockerfile_stages', [])
