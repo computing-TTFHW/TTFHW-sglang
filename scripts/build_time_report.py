@@ -324,129 +324,82 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                     job_info['steps'].append(step_info)
 
         # Get job logs for Dockerfile parsing
-        # GitHub job logs are returned as a compressed text file with all steps mixed together
-        # We need to parse the log carefully to extract BuildKit output
+        # GitHub returns workflow logs as a zip file with separate log files per job
         if job.get('status') == 'completed':
             print(f"  Looking for Docker build output in job '{job['job_name']}'...")
 
-            # Use workflow run logs API to get complete build output
-            # This gives us the full log with all BuildKit output
             if run_id:
-                # First, download the complete workflow run log
+                # Download workflow run logs (returns a zip file)
                 workflow_log_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/logs"
                 workflow_log_resp = requests.get(workflow_log_url, headers=headers)
 
                 if workflow_log_resp.status_code == 200:
-                    # The logs endpoint returns a zip file when called from API
-                    # We need to handle it differently - use the job's trace URL instead
-                    print(f"    Attempting to get job trace log...")
+                    try:
+                        # GitHub returns a zip file containing log files for each job
+                        log_zip = zipfile.ZipFile(io.BytesIO(workflow_log_resp.content))
 
-                    # Alternative: Use the job log URL which returns plain text
-                    job_trace_url = f"https://api.github.com/repos/{repo}/actions/jobs/{job['id']}/logs"
-                    job_trace_resp = requests.get(job_trace_url, headers=headers)
+                        # Find the log file for this job
+                        # Job log filenames follow the pattern: {job_name}/{step_number}_{step_name}.txt
+                        job_name_safe = job['job_name'].replace(' ', '_')
+                        log_filename = None
 
-                    if job_trace_resp.status_code == 200:
-                        raw_log = job_trace_resp.text
-                        log_content = strip_ansi(raw_log)
+                        for name in log_zip.namelist():
+                            # Match job name in the path
+                            if name.startswith(job_name_safe + '/') or '/' + job_name_safe in name:
+                                log_filename = name
+                                break
 
-                        # Check if this looks like BuildKit output
-                        has_buildkit = '#[' in log_content or '# DONE' in log_content
+                        # If not found by name, try to find by pattern
+                        if not log_filename:
+                            for name in log_zip.namelist():
+                                if job['job_name'].replace(' ', '').lower() in name.lower():
+                                    log_filename = name
+                                    break
 
-                        if has_buildkit:
-                            print(f"    Found BuildKit output in job log ({len(log_content)} bytes)")
-                            dockerfile_stages = parse_dockerfile_log(log_content)
-                            job_info['dockerfile_stages'] = dockerfile_stages
-                            print(f"    Found {len(dockerfile_stages)} Dockerfile stages")
+                        # If still not found, use the first log file that looks like a build log
+                        if not log_filename and log_zip.namelist():
+                            for name in log_zip.namelist():
+                                if name.endswith('.txt') and 'build' in name.lower():
+                                    log_filename = name
+                                    break
 
-                            # Save raw log for debugging
-                            safe_job_name = job['job_name'].replace('/', '-').replace('\\', '-').replace(' ', '_')
-                            log_file = f'logs/job-{safe_job_name}-{job.get("id", "unknown")}.log'
-                            os.makedirs(os.path.dirname(log_file), exist_ok=True)
-                            with open(log_file, 'w', encoding='utf-8') as f:
-                                f.write(log_content)
-                            print(f"    Log saved to {log_file}")
-                        else:
-                            print(f"    No BuildKit output found in this job's log")
-                            # Save log anyway for debugging
-                            safe_job_name = job['job_name'].replace('/', '-').replace('\\', '-').replace(' ', '_')
-                            log_file = f'logs/job-{safe_job_name}-{job.get("id", "unknown")}.log'
-                            os.makedirs(os.path.dirname(log_file), exist_ok=True)
-                            with open(log_file, 'w', encoding='utf-8') as f:
-                                f.write(log_content[:10000])  # Save first 10KB for debugging
-                            print(f"    Sample log saved to {log_file} for inspection")
-                    else:
-                        print(f"    Could not get job log: HTTP {job_trace_resp.status_code}")
+                        # Last resort: use first file
+                        if not log_filename and log_zip.namelist():
+                            log_filename = log_zip.namelist()[0]
 
-                        # Try to get logs from the workflow run level
-                        # GitHub returns logs as a zip file, we need to handle it
-                        print(f"    Trying workflow-level logs...")
+                        if log_filename:
+                            print(f"    Found log file: {log_filename}")
+                            with log_zip.open(log_filename) as log_file:
+                                raw_log = log_file.read().decode('utf-8', errors='ignore')
+                                log_content = strip_ansi(raw_log)
 
-                        # Download and extract workflow logs
-                        workflow_log_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/logs"
-                        workflow_log_resp = requests.get(workflow_log_url, headers=headers)
+                                # Check for BuildKit output
+                                has_buildkit = '#[' in log_content or '# DONE' in log_content or 'DOCKER_BUILDKIT' in log_content
 
-                        if workflow_log_resp.status_code == 200:
-                            try:
-                                # GitHub returns a zip file containing log files for each job
-                                log_zip = zipfile.ZipFile(io.BytesIO(workflow_log_resp.content))
-
-                                # Find the log file for this job
-                                job_name_safe = job['job_name'].replace(' ', '_')
-                                log_filename = None
-
-                                for name in log_zip.namelist():
-                                    if job_name_safe.replace('_', '-') in name or job_name_safe in name:
-                                        log_filename = name
-                                        break
-
-                                # If not found, try to match by job ID
-                                if not log_filename:
-                                    for name in log_zip.namelist():
-                                        if str(job.get('id', '')) in name:
-                                            log_filename = name
-                                            break
-
-                                # If still not found, use the first log file
-                                if not log_filename and log_zip.namelist():
-                                    log_filename = log_zip.namelist()[0]
-
-                                if log_filename:
-                                    print(f"    Found log file in zip: {log_filename}")
-                                    with log_zip.open(log_filename) as log_file:
-                                        raw_log = log_file.read().decode('utf-8', errors='ignore')
-                                        log_content = strip_ansi(raw_log)
-
-                                        # Check for BuildKit output
-                                        has_buildkit = '#[' in log_content or '# DONE' in log_content
-
-                                        if has_buildkit:
-                                            print(f"    Found BuildKit output ({len(log_content)} bytes)")
-                                            dockerfile_stages = parse_dockerfile_log(log_content)
-                                            job_info['dockerfile_stages'] = dockerfile_stages
-                                            print(f"    Found {len(dockerfile_stages)} Dockerfile stages")
-
-                                            # Save for debugging
-                                            safe_job_name = job['job_name'].replace('/', '-').replace(' ', '_')
-                                            log_file_path = f'logs/workflow-{safe_job_name}-{job.get("id", "unknown")}.log'
-                                            os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
-                                            with open(log_file_path, 'w', encoding='utf-8') as f:
-                                                f.write(log_content)
-                                            print(f"    Log saved to {log_file_path}")
-                                        else:
-                                            print(f"    No BuildKit output in this log file")
-                                else:
-                                    print(f"    Could not find matching log file in workflow zip")
-
-                            except zipfile.BadZipfile:
-                                print(f"    Response is not a valid zip file, trying as plain text...")
-                                # Fallback: treat as plain text
-                                log_content = strip_ansi(workflow_log_resp.text)
-                                dockerfile_stages = parse_dockerfile_log(log_content)
-                                if dockerfile_stages:
+                                if has_buildkit:
+                                    print(f"    Found BuildKit output ({len(log_content)} bytes)")
+                                    dockerfile_stages = parse_dockerfile_log(log_content)
                                     job_info['dockerfile_stages'] = dockerfile_stages
                                     print(f"    Found {len(dockerfile_stages)} Dockerfile stages")
-                            except Exception as e:
-                                print(f"    Error processing workflow logs: {e}")
+                                else:
+                                    print(f"    No BuildKit output found in this log file")
+
+                                # Save log for debugging
+                                safe_job_name = job['job_name'].replace('/', '-').replace(' ', '_')
+                                log_file_path = f'logs/workflow-{safe_job_name}-{job.get("id", "unknown")}.log'
+                                os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+                                with open(log_file_path, 'w', encoding='utf-8') as f:
+                                    f.write(log_content)
+                                print(f"    Log saved to {log_file_path}")
+                        else:
+                            print(f"    Could not find log file in workflow zip")
+
+                    except zipfile.BadZipfile:
+                        print(f"    Response is not a valid zip file")
+                    except Exception as e:
+                        print(f"    Error processing workflow logs: {e}")
+                else:
+                    print(f"    Could not get workflow logs: HTTP {workflow_log_resp.status_code}")
 
         build_report['jobs'].append(job_info)
 
