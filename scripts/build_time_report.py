@@ -438,7 +438,7 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                         # Parse each log file and look for build output
                         dockerfile_stages = []
                         for log_filename in target_files:
-                            print(f"    Trying log file: {log_filename}")
+                            print(f"    ========== Processing log file: {log_filename} ==========")
                             try:
                                 with log_zip.open(log_filename) as log_file:
                                     raw_log = log_file.read().decode('utf-8', errors='ignore')
@@ -450,33 +450,27 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                                     full_log_path = f'{log_dir}/{log_filename.replace("/", "_")}'
                                     with open(full_log_path, 'w', encoding='utf-8') as f:
                                         f.write(log_content)
-                                    print(f"      Saved full log to {full_log_path}")
+                                    print(f"      Saved full log ({len(log_content)} bytes) to {full_log_path}")
 
-                                    # Print first 100 lines for debugging
-                                    lines = log_content.split('\n')
-                                    print(f"      Log has {len(lines)} lines")
-                                    print(f"      First 50 lines preview:")
-                                    for i, line in enumerate(lines[:50]):
-                                        print(f"        [{i}] {line[:200]}")
+                                    # Count lines containing # and DONE for quick verification
+                                    hash_lines = sum(1 for l in log_content.split('\n') if '#' in l and '[' in l)
+                                    done_lines = sum(1 for l in log_content.split('\n') if 'DONE' in l)
+                                    print(f"      Log stats: {hash_lines} stage lines, {done_lines} DONE lines")
 
                                     # Check for BuildKit output
-                                    has_buildkit = '#[' in log_content or '# DONE' in log_content
+                                    has_buildkit = '#[' in log_content or '# DONE' in log_content or 'DONE' in log_content
 
                                     if has_buildkit:
-                                        print(f"      Found BuildKit output format")
+                                        print(f"      BuildKit output detected")
                                         # Pass dockerfile_content to parser for better matching
                                         stages = parse_dockerfile_log(log_content, dockerfile_content)
                                         if stages:
-                                            print(f"      Parsed {len(stages)} Dockerfile stages")
+                                            print(f"      ✓ Parsed {len(stages)} Dockerfile stages")
                                             dockerfile_stages.extend(stages)
+                                        else:
+                                            print(f"      ✗ No stages parsed (check debug output above)")
                                     else:
-                                        print(f"      No BuildKit output found, trying alternative parsing...")
-                                        # Try to find any timing information
-                                        timing_pattern = re.compile(r'(\d+\.\d+s|\d+:\d+:\d+)')
-                                        timing_lines = [l for l in lines if timing_pattern.search(l) and len(l) < 300]
-                                        print(f"      Found {len(timing_lines)} lines with timing info")
-                                        for line in timing_lines[:20]:
-                                            print(f"        {line}")
+                                        print(f"      No BuildKit output found")
                             except Exception as e:
                                 print(f"      Error parsing {log_filename}: {e}")
                                 import traceback
