@@ -5,7 +5,7 @@ on:
     inputs:
       run_id:
         description: 'Workflow run ID to analyze'
-        required: true
+        required: false
         type: string
       output_artifact_name:
         description: 'Name of the artifact to upload'
@@ -58,6 +58,7 @@ jobs:
       - name: Generate build time report
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use provided run_id or fall back to current workflow run_id
           RUN_ID: ${{ inputs.run_id || github.run_id }}
           REPO: ${{ github.repository }}
           OUTPUT_DIR: '.'

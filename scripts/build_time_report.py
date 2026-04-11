@@ -15,6 +15,15 @@ from datetime import datetime
 from collections import defaultdict
 
 
+# ANSI escape code pattern
+ANSI_PATTERN = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+
+def strip_ansi(text):
+    """Remove ANSI escape codes from text."""
+    return ANSI_PATTERN.sub('', text)
+
+
 def parse_time(time_str):
     """Parse ISO format time string to datetime object."""
     if time_str and time_str != 'unknown':
@@ -52,61 +61,57 @@ def parse_dockerfile_log(log_content):
     - ENV/ARG/LABEL: Metadata operations
     - WORKDIR: Directory operations
     - EXPOSE/CMD/ENTRYPOINT: Container configuration
+
+    Buildkit log format:
+    #1 [internal] load build definition from Dockerfile
+    #1 DONE 0.5s
+
+    #2 [linux/amd64 internal] load metadata for ...
+    #2 DONE 1.2s
+
+    #3 [1/8] FROM docker.io/python:3.11-slim
+    #3 DONE 10.5s
     """
     stages = []
     stage_starts = {}
 
-    # Pattern for buildkit stage: #N [stage-info] command
-    stage_pattern = r'#(\d+)\s+\[([^\]]*)\]\s+(.+)'
-    done_pattern = r'#(\d+)\s+DONE\s+(\d+\.\d+s)'
+    # Pattern for buildkit stage start: #N [...] command
+    # Matches lines like:
+    #   #1 [internal] load build definition from Dockerfile
+    #   #2 [linux/amd64 internal] load metadata for ...
+    #   #3 [1/8] FROM docker.io/python:3.11-slim
+    #   #3 0.123 resolve docker.io/python:3.11-slim
+    stage_pattern = r'^#(\d+)\s+(?:\[([^\]]*)\])?\s*(.*)'
+
+    # Pattern for DONE line: #N DONE 1.234s
+    done_pattern = r'^#(\d+)\s+DONE\s+(\d+\.\d+s)'
 
     # Pattern to identify Dockerfile instruction type
     dockerfile_instructions = {
-        'FROM': r'FROM\s+([^\s]+)',
-        'RUN': r'RUN\s+(.+)',
-        'COPY': r'COPY\s+(.+)',
-        'ADD': r'ADD\s+(.+)',
-        'ENV': r'ENV\s+(.+)',
-        'ARG': r'ARG\s+(.+)',
-        'LABEL': r'LABEL\s+(.+)',
-        'WORKDIR': r'WORKDIR\s+(.+)',
-        'EXPOSE': r'EXPOSE\s+(.+)',
-        'CMD': r'CMD\s+(.+)',
-        'ENTRYPOINT': r'ENTRYPOINT\s+(.+)',
-        'USER': r'USER\s+(.+)',
-        'VOLUME': r'VOLUME\s+(.+)',
-        'SHELL': r'SHELL\s+(.+)',
+        'FROM': r'^FROM\s+',
+        'RUN': r'^RUN\s+',
+        'COPY': r'^COPY\s+',
+        'ADD': r'^ADD\s+',
+        'ENV': r'^ENV\s+',
+        'ARG': r'^ARG\s+',
+        'LABEL': r'^LABEL\s+',
+        'WORKDIR': r'^WORKDIR\s+',
+        'EXPOSE': r'^EXPOSE\s+',
+        'CMD': r'^CMD\s+',
+        'ENTRYPOINT': r'^ENTRYPOINT\s+',
+        'USER': r'^USER\s+',
+        'VOLUME': r'^VOLUME\s+',
+        'SHELL': r'^SHELL\s+',
     }
 
     lines = log_content.split('\n')
 
     for line in lines:
-        # Check for stage start
-        stage_match = re.search(stage_pattern, line)
-        if stage_match:
-            stage_num = stage_match.group(1)
-            stage_info = stage_match.group(2)
-            stage_cmd = stage_match.group(3).strip()
+        line = line.strip()
+        if not line:
+            continue
 
-            # Identify Dockerfile instruction type
-            instruction_type = 'OTHER'
-            instruction_detail = stage_cmd[:150]
-
-            for instr_type, pattern in dockerfile_instructions.items():
-                instr_match = re.search(pattern, stage_cmd, re.IGNORECASE)
-                if instr_match:
-                    instruction_type = instr_type
-                    instruction_detail = instr_match.group(1)[:150] if instr_match.lastindex else stage_cmd[:150]
-                    break
-
-            stage_starts[stage_num] = {
-                'stage_info': stage_info,
-                'command': stage_cmd[:150],
-                'instruction_type': instruction_type,
-                'instruction_detail': instruction_detail
-            }
-
-        # Check for DONE
+        # Check for DONE first (must happen after stage start)
         done_match = re.search(done_pattern, line)
         if done_match:
             stage_num = done_match.group(1)
@@ -124,7 +129,53 @@ def parse_dockerfile_log(log_content):
                     'duration': duration_sec,
                     'duration_formatted': format_duration(duration_sec)
                 })
+            continue
 
+        # Check for stage start
+        stage_match = re.search(stage_pattern, line)
+        if stage_match:
+            stage_num = stage_match.group(1)
+            stage_info = stage_match.group(2).strip() if stage_match.group(2) else ''
+            stage_cmd = stage_match.group(3).strip()
+
+            # Skip if we already have a DONE for this stage
+            if stage_num in stage_starts and any(s['stage_id'] == f"#{stage_num}" for s in stages):
+                continue
+
+            # Identify Dockerfile instruction type
+            instruction_type = 'OTHER'
+            instruction_detail = stage_cmd[:150]
+
+            # Check if stage_info contains a FROM instruction or [stage_num/total] FROM ...
+            if stage_info:
+                # Check for [1/8] FROM pattern
+                from_match = re.search(r'FROM\s+(\S+)', stage_info, re.IGNORECASE)
+                if from_match:
+                    instruction_type = 'FROM'
+                    instruction_detail = from_match.group(1)[:150]
+                else:
+                    for instr_type, pattern in dockerfile_instructions.items():
+                        if re.search(pattern, stage_info, re.IGNORECASE):
+                            instruction_type = instr_type
+                            instruction_detail = stage_info[:150]
+                            break
+
+            # If not found in stage_info, check stage_cmd
+            if instruction_type == 'OTHER' and stage_cmd:
+                for instr_type, pattern in dockerfile_instructions.items():
+                    if re.search(pattern, stage_cmd, re.IGNORECASE):
+                        instruction_type = instr_type
+                        instruction_detail = stage_cmd[:150]
+                        break
+
+            stage_starts[stage_num] = {
+                'stage_info': stage_info,
+                'command': stage_cmd[:150],
+                'instruction_type': instruction_type,
+                'instruction_detail': instruction_detail
+            }
+
+    print(f"  Total: {len(stages)} Dockerfile stages found")
     return stages
 
 
@@ -170,13 +221,19 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
     # Get all jobs for this run (with pagination support)
     all_jobs = []
     jobs_url = f'https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs'
+
+    print(f"Fetching jobs for run {run_id}...")
     while jobs_url:
         jobs_resp = requests.get(jobs_url, headers=headers)
         jobs_resp.raise_for_status()
         jobs_data = jobs_resp.json()
-        all_jobs.extend(jobs_data.get('jobs', []))
+        new_jobs = jobs_data.get('jobs', [])
+        print(f"  Found {len(new_jobs)} jobs in this page (total: {len(all_jobs) + len(new_jobs)})")
+        all_jobs.extend(new_jobs)
         # Handle pagination
         jobs_url = jobs_resp.links.get('next', {}).get('url')
+
+    print(f"Total jobs to process: {len(all_jobs)}")
 
     build_report = {
         'workflow_name': run_data.get('name', 'Unknown'),
@@ -194,6 +251,8 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
         # Skip jobs that are not completed
         if job.get('status') != 'completed':
             continue
+
+        print(f"Processing job: {job.get('name', 'Unknown')} (ID: {job.get('id')})...")
 
         job_started = parse_time(job.get('started_at'))
         job_completed = parse_time(job.get('completed_at'))
@@ -243,7 +302,10 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
         if job.get('status') == 'completed' and job.get('log_url'):
             log_resp = requests.get(job['log_url'], headers=headers)
             if log_resp.status_code == 200:
-                log_content = log_resp.text
+                # GitHub Actions logs contain ANSI codes, strip them
+                raw_log = log_resp.text
+                log_content = strip_ansi(raw_log)
+                print(f"  Parsing logs for job '{job['job_name']}' ({len(log_content)} bytes)...")
                 dockerfile_stages = parse_dockerfile_log(log_content)
                 job_info['dockerfile_stages'] = dockerfile_stages
 
