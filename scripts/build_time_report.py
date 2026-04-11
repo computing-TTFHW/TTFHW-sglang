@@ -357,31 +357,53 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                         # Store all log file names for this job in job_info
                         job_info['log_files'] = all_log_files
 
-                        # Find log files for this job by job ID
-                        # GitHub log file naming pattern: {job_name}_{job_id}/{step_number}_{step_name}.txt
+                        # Find log files for this job
+                        # GitHub log file naming pattern: {step_num}_{job_name}.txt
+                        # e.g., "0_build-npu-image (8.5.0, 910b).txt"
                         job_id_str = str(job_id)
                         target_files = []
                         found_log_files = []  # Store found log files for this job
 
+                        # Strategy 1: Match by job name (with or without step number prefix)
+                        # Pattern: {num}_{job_name}.txt or {job_name}.txt
                         for name in log_zip.namelist():
-                            # Match by job ID in the path
-                            if f'_{job_id_str}/' in name or name.startswith(f'{job_name}_'):
-                                target_files.append(name)
-                                found_log_files.append(name)
+                            if name.endswith('.txt'):
+                                # Remove step number prefix like "0_" or "1_"
+                                name_without_prefix = name
+                                if name[0].isdigit() and '_' in name:
+                                    name_without_prefix = name.split('_', 1)[1]
 
-                        # If not found by job ID, try matching by job name
-                        if not target_files:
-                            job_name_safe = job_name.replace(' ', '_').replace('-', '_')
-                            for name in log_zip.namelist():
-                                if name.startswith(job_name_safe + '_') or '/' + job_name_safe + '_' in name:
+                                # Check if job name matches
+                                if job_name in name or job_name in name_without_prefix:
                                     target_files.append(name)
                                     found_log_files.append(name)
 
-                        # If still not found, look for files containing "build" or "docker"
+                        # Strategy 2: Match by job ID in path
+                        if not target_files:
+                            for name in log_zip.namelist():
+                                if f'_{job_id_str}/' in name or name.startswith(f'{job_name}_'):
+                                    target_files.append(name)
+                                    found_log_files.append(name)
+
+                        # Strategy 3: Look for files containing "build" and job matrix values
+                        if not target_files:
+                            # Extract matrix values from job name (e.g., "8.5.0" and "910b" or "a3")
+                            import re
+                            matrix_matches = re.findall(r'\(([^)]+)\)', job_name)
+                            if matrix_matches:
+                                matrix_values = matrix_matches[0].split(', ')
+                                for name in log_zip.namelist():
+                                    if name.endswith('.txt'):
+                                        # Check if all matrix values are in the filename
+                                        if all(val in name for val in matrix_values):
+                                            target_files.append(name)
+                                            found_log_files.append(name)
+
+                        # Strategy 4: Look for any file containing "build"
                         if not target_files:
                             for name in log_zip.namelist():
                                 lower_name = name.lower()
-                                if ('build' in lower_name or 'docker' in lower_name) and name.endswith('.txt'):
+                                if 'build' in lower_name and name.endswith('.txt'):
                                     target_files.append(name)
                                     found_log_files.append(name)
 
