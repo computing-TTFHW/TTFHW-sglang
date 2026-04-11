@@ -160,6 +160,46 @@
             font-size: 13px;
             margin-bottom: 8px;
         }
+        .instruction-type {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 700;
+            margin-right: 8px;
+        }
+        .instr-FROM { background: #db6d28; color: #fff; }
+        .instr-RUN { background: #238636; color: #fff; }
+        .instr-COPY { background: #1f6feb; color: #fff; }
+        .instr-ADD { background: #3fb950; color: #fff; }
+        .instr-ENV { background: #9e6a28; color: #fff; }
+        .instr-ARG { background: #8957e5; color: #fff; }
+        .instr-LABEL { background: #a371f7; color: #fff; }
+        .instr-WORKDIR { background: #636cff; color: #fff; }
+        .instr-EXPOSE { background: #26976f; color: #fff; }
+        .instr-CMD { background: #6e7681; color: #fff; }
+        .instr-ENTRYPOINT { background: #484f58; color: #fff; }
+        .instr-USER { background: #c2985b; color: #fff; }
+        .instr-VOLUME { background: #388bfd; color: #fff; }
+        .instr-SHELL { background: #f78166; color: #fff; }
+        .instr-OTHER { background: #6e7681; color: #fff; }
+
+        .instruction-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin: 15px 0;
+        }
+        .instr-card {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 15px;
+            text-align: center;
+        }
+        .instr-card .type { font-size: 18px; font-weight: 700; margin-bottom: 5px; }
+        .instr-card .count { color: #8b949e; font-size: 12px; }
+        .instr-card .duration { color: #7ee787; font-weight: 600; font-size: 14px; }
 
         .slowest-stages {
             background: #161b22;
@@ -264,6 +304,9 @@
         <h2>Build Jobs</h2>
 
         {{JOBS_CONTENT}}
+
+        <h2>Dockerfile Instruction Summary</h2>
+        {{DOCKERFILE_INSTRUCTION_SUMMARY}}
 
         <h2>Top 10 Slowest Dockerfile Stages</h2>
         <div class="slowest-stages">

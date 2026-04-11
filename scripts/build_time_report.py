@@ -42,13 +42,41 @@ def format_duration(seconds):
 
 
 def parse_dockerfile_log(log_content):
-    """Parse Buildkit log to extract Dockerfile stage timings."""
+    """
+    Parse Buildkit log to extract Dockerfile stage timings.
+
+    Extracts timing for each Dockerfile layer including:
+    - FROM: Base image pull
+    - RUN: Command execution
+    - COPY/ADD: File operations
+    - ENV/ARG/LABEL: Metadata operations
+    - WORKDIR: Directory operations
+    - EXPOSE/CMD/ENTRYPOINT: Container configuration
+    """
     stages = []
     stage_starts = {}
 
     # Pattern for buildkit stage: #N [stage-info] command
     stage_pattern = r'#(\d+)\s+\[([^\]]*)\]\s+(.+)'
     done_pattern = r'#(\d+)\s+DONE\s+(\d+\.\d+s)'
+
+    # Pattern to identify Dockerfile instruction type
+    dockerfile_instructions = {
+        'FROM': r'FROM\s+([^\s]+)',
+        'RUN': r'RUN\s+(.+)',
+        'COPY': r'COPY\s+(.+)',
+        'ADD': r'ADD\s+(.+)',
+        'ENV': r'ENV\s+(.+)',
+        'ARG': r'ARG\s+(.+)',
+        'LABEL': r'LABEL\s+(.+)',
+        'WORKDIR': r'WORKDIR\s+(.+)',
+        'EXPOSE': r'EXPOSE\s+(.+)',
+        'CMD': r'CMD\s+(.+)',
+        'ENTRYPOINT': r'ENTRYPOINT\s+(.+)',
+        'USER': r'USER\s+(.+)',
+        'VOLUME': r'VOLUME\s+(.+)',
+        'SHELL': r'SHELL\s+(.+)',
+    }
 
     lines = log_content.split('\n')
 
@@ -59,9 +87,23 @@ def parse_dockerfile_log(log_content):
             stage_num = stage_match.group(1)
             stage_info = stage_match.group(2)
             stage_cmd = stage_match.group(3).strip()
+
+            # Identify Dockerfile instruction type
+            instruction_type = 'OTHER'
+            instruction_detail = stage_cmd[:150]
+
+            for instr_type, pattern in dockerfile_instructions.items():
+                instr_match = re.search(pattern, stage_cmd, re.IGNORECASE)
+                if instr_match:
+                    instruction_type = instr_type
+                    instruction_detail = instr_match.group(1)[:150] if instr_match.lastindex else stage_cmd[:150]
+                    break
+
             stage_starts[stage_num] = {
                 'stage_info': stage_info,
-                'command': stage_cmd[:150]
+                'command': stage_cmd[:150],
+                'instruction_type': instruction_type,
+                'instruction_detail': instruction_detail
             }
 
         # Check for DONE
@@ -77,6 +119,8 @@ def parse_dockerfile_log(log_content):
                     'stage_id': f"#{stage_num}",
                     'stage_info': stage_data['stage_info'],
                     'command': stage_data['command'],
+                    'instruction_type': stage_data['instruction_type'],
+                    'instruction_detail': stage_data['instruction_detail'],
                     'duration': duration_sec,
                     'duration_formatted': format_duration(duration_sec)
                 })
@@ -84,16 +128,29 @@ def parse_dockerfile_log(log_content):
     return stages
 
 
-def get_html_template():
-    """Load HTML template from file."""
-    template_path = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
-        'scripts',
-        'report_templates',
-        'report_template.html'
-    )
-    with open(template_path, 'r') as f:
-        return f.read()
+def analyze_dockerfile_stages(stages):
+    """
+    Analyze Dockerfile stages and group by instruction type.
+
+    Returns statistics about each instruction type.
+    """
+    by_type = defaultdict(list)
+    for stage in stages:
+        instr_type = stage.get('instruction_type', 'OTHER')
+        by_type[instr_type].append(stage)
+
+    analysis = {}
+    for instr_type, type_stages in by_type.items():
+        total_duration = sum(s.get('duration', 0) for s in type_stages)
+        analysis[instr_type] = {
+            'count': len(type_stages),
+            'total_duration': total_duration,
+            'total_duration_formatted': format_duration(total_duration),
+            'avg_duration': total_duration / len(type_stages) if type_stages else 0,
+            'stages': type_stages
+        }
+
+    return analysis
 
 
 def generate_build_report(gh_token, run_id, repo, output_dir='.'):
@@ -110,11 +167,16 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
     run_resp.raise_for_status()
     run_data = run_resp.json()
 
-    # Get all jobs for this run
+    # Get all jobs for this run (with pagination support)
+    all_jobs = []
     jobs_url = f'https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs'
-    jobs_resp = requests.get(jobs_url, headers=headers)
-    jobs_resp.raise_for_status()
-    jobs_data = jobs_resp.json()
+    while jobs_url:
+        jobs_resp = requests.get(jobs_url, headers=headers)
+        jobs_resp.raise_for_status()
+        jobs_data = jobs_resp.json()
+        all_jobs.extend(jobs_data.get('jobs', []))
+        # Handle pagination
+        jobs_url = jobs_resp.links.get('next', {}).get('url')
 
     build_report = {
         'workflow_name': run_data.get('name', 'Unknown'),
@@ -128,7 +190,11 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
         'jobs': []
     }
 
-    for job in jobs_data.get('jobs', []):
+    for job in all_jobs:
+        # Skip jobs that are not completed
+        if job.get('status') != 'completed':
+            continue
+
         job_started = parse_time(job.get('started_at'))
         job_completed = parse_time(job.get('completed_at'))
 
@@ -185,6 +251,10 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
 
     # Calculate summary statistics
     all_stages = [s for j in build_report['jobs'] for s in j.get('dockerfile_stages', [])]
+
+    # Analyze Dockerfile stages by instruction type
+    dockerfile_analysis = analyze_dockerfile_stages(all_stages)
+
     build_report['summary'] = {
         'total_jobs': len(build_report['jobs']),
         'successful_jobs': sum(1 for j in build_report['jobs'] if j.get('conclusion') == 'success'),
@@ -194,7 +264,8 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
             all_stages,
             key=lambda x: x.get('duration', 0),
             reverse=True
-        )[:10]
+        )[:10],
+        'dockerfile_analysis': dockerfile_analysis
     }
 
     # Save JSON report
@@ -309,17 +380,20 @@ def generate_html_report(report, output_dir='.'):
                 stage_info = stage.get('stage_info', '')
                 stage_cmd = stage.get('command', '')
                 stage_duration = stage.get('duration_formatted', 'N/A')
+                instr_type = stage.get('instruction_type', 'OTHER')
+                instr_detail = stage.get('instruction_detail', '')
 
                 job_html += f'''
                 <div class="stage-card">
                     <div class="stage-header">
                         <div>
                             <span class="stage-id">{stage_id}</span>
+                            <span class="instruction-type instr-{instr_type}">{instr_type}</span>
                             <span class="stage-info">{stage_info}</span>
                         </div>
                         <span class="stage-duration">{stage_duration}</span>
                     </div>
-                    <div class="stage-command">{stage_cmd}</div>
+                    <div class="stage-command">{instr_detail}</div>
                 </div>
                 '''
 
@@ -334,6 +408,35 @@ def generate_html_report(report, output_dir='.'):
 
     html = html.replace('{{JOBS_CONTENT}}', jobs_html)
 
+    # Generate Dockerfile instruction summary HTML
+    dockerfile_analysis = report['summary'].get('dockerfile_analysis', {})
+    instruction_summary_html = '<div class="instruction-summary">'
+
+    if dockerfile_analysis:
+        # Sort by total duration (descending)
+        sorted_types = sorted(
+            dockerfile_analysis.items(),
+            key=lambda x: x[1]['total_duration'],
+            reverse=True
+        )
+
+        for instr_type, data in sorted_types:
+            instruction_summary_html += f'''
+            <div class="instr-card">
+                <div class="type"><span class="instruction-type instr-{instr_type}">{instr_type}</span></div>
+                <div class="count">{data['count']} stages</div>
+                <div class="duration">Total: {data['total_duration_formatted']}</div>
+            </div>
+            '''
+
+    instruction_summary_html += '</div>'
+
+    # Handle empty case
+    if not dockerfile_analysis:
+        instruction_summary_html = '<p style="color: #8b949e;">No Dockerfile instruction data available</p>'
+
+    html = html.replace('{{DOCKERFILE_INSTRUCTION_SUMMARY}}', instruction_summary_html)
+
     # Generate slowest stages HTML
     slowest = report['summary'].get('slowest_stages', [])
     slowest_html = ""
@@ -342,11 +445,13 @@ def generate_html_report(report, output_dir='.'):
             stage_info = stage.get('stage_info', '')
             stage_cmd = stage.get('command', '')[:80]
             stage_duration = stage.get('duration_formatted', 'N/A')
+            instr_type = stage.get('instruction_type', 'OTHER')
 
             slowest_html += f'''
             <div class="slowest-item">
                 <div class="slowest-rank">{idx}</div>
                 <div class="slowest-details">
+                    <span class="instruction-type instr-{instr_type}">{instr_type}</span>
                     <div class="slowest-stage">{stage_info} - {stage_cmd}...</div>
                 </div>
                 <div class="slowest-duration">{stage_duration}</div>
