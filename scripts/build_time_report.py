@@ -343,8 +343,7 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
 
                     # Alternative: Use the job log URL which returns plain text
                     job_trace_url = f"https://api.github.com/repos/{repo}/actions/jobs/{job['id']}/logs"
-                    job_trace_resp = requests.get(job_trace_url, headers=headers,
-                                                   headers={**headers, 'Accept': 'application/vnd.github.v3+json'})
+                    job_trace_resp = requests.get(job_trace_url, headers=headers)
 
                     if job_trace_resp.status_code == 200:
                         raw_log = job_trace_resp.text
