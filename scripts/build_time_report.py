@@ -56,18 +56,12 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
     """
     Parse Buildkit log to extract Dockerfile stage timings.
 
-    Strategy:
-    1. Parse Dockerfile to get list of instructions (FROM, RUN, COPY, etc.)
-    2. Search logs for each instruction's completion time
+    Actual log format:
+    #5 [linux/amd64  1/12] FROM quay.io/...
+    #5 DONE 106.7s
 
-    BuildKit log format:
-    #6 [linux/amd64 1/12] FROM quay.io/...@sha256:...
-    #6 DONE 15.5s
-
-    Or:
-    #6 [linux/amd64 2/12] RUN apt-get update...
-    #6 0.123 Running...
-    #6 DONE 30.5s
+    #7 [linux/arm64  1/12] FROM quay.io/...
+    #7 DONE 102.8s
     """
     import re as regex
     stages = []
@@ -75,14 +69,14 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
     lines = log_content.split('\n')
     print(f"    Parsing {len(lines)} lines of log...")
 
-    # Pattern to match stage completion: #N [...] X/Y] INSTR ... -> followed by #N DONE X.Xs
-    # We look for lines like: #6 [linux/amd64 1/12] FROM ...
-    stage_start_pattern = regex.compile(r'^#(\d+)\s+\[([^\]]*)\]\s*\[(\d+)/(\d+)\]\s*(\w+)\s+(.*)')
+    # Pattern: #5 [linux/amd64  1/12] FROM ...
+    # Note: There may be double spaces between platform and step number
+    stage_start_pattern = regex.compile(r'^#(\d+)\s+\[([a-z0-9/]+)\s+(\d+)/(\d+)\]\s*(\w+)\s+(.*)')
 
     # Pattern for DONE: #N DONE X.Xs
     done_pattern = regex.compile(r'^#(\d+)\s+DONE\s+(\d+\.\d+s)')
 
-    # Track stages by stage number
+    # Track stages by unique key: stage_num + platform
     stage_info = {}
 
     for line in lines:
@@ -92,27 +86,31 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
         if line.startswith(('Mon,', 'Tue,', 'Wed,', 'Thu,', 'Fri,', 'Sat,', 'Sun,')):
             continue
 
-        # Look for stage start with step number like [1/12]
+        # Look for stage start with platform and step number
         match = stage_start_pattern.search(line)
         if match:
             stage_num = match.group(1)
-            platform = match.group(2)
+            platform = match.group(2).strip()  # e.g., "linux/amd64"
             step_num = match.group(3)  # e.g., "1" in [1/12]
             total_steps = match.group(4)  # e.g., "12" in [1/12]
             instruction = match.group(5).upper()  # FROM, RUN, COPY, etc.
             command = match.group(6)[:100]
 
-            stage_info[stage_num] = {
+            # Use stage_num + platform as unique key
+            unique_key = f"{stage_num}_{platform}"
+
+            stage_info[unique_key] = {
                 'stage_id': f"#{stage_num}",
+                'platform': platform,
                 'step': f"[{step_num}/{total_steps}]",
                 'instruction_type': instruction,
-                'instruction_detail': command,
+                'instruction_detail': command[:80],
                 'stage_info': platform,
                 'command': command,
                 'duration': None,
                 'duration_formatted': 'N/A'
             }
-            print(f"    Found stage #{stage_num} [{step_num}/{total_steps}] {instruction}: {command[:50]}")
+            print(f"    Found stage #{stage_num} [{platform}] [{step_num}/{total_steps}] {instruction}: {command[:50]}")
             continue
 
         # Look for DONE line
@@ -122,17 +120,20 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
             duration_str = match.group(2)
             duration_sec = float(duration_str.replace('s', ''))
 
-            if stage_num in stage_info:
-                stage_info[stage_num]['duration'] = duration_sec
-                stage_info[stage_num]['duration_formatted'] = format_duration(duration_sec)
-                print(f"    Stage #{stage_num} completed in {duration_sec:.1f}s")
+            # Find matching stage - could be any platform with this stage_num
+            for key in stage_info:
+                if key.startswith(f"{stage_num}_") and stage_info[key]['duration'] is None:
+                    stage_info[key]['duration'] = duration_sec
+                    stage_info[key]['duration_formatted'] = format_duration(duration_sec)
+                    print(f"    Stage #{stage_num} [{stage_info[key]['platform']}] completed in {duration_sec:.1f}s")
+                    break
 
-    # Build final list, sorted by step number
-    for stage_num in sorted(stage_info.keys(), key=lambda x: int(x)):
-        if stage_info[stage_num].get('duration') is not None:
-            stages.append(stage_info[stage_num])
+    # Build final list - only include amd64 stages (the primary build)
+    for key in sorted(stage_info.keys()):
+        if stage_info[key].get('duration') is not None and 'amd64' in stage_info[key].get('platform', ''):
+            stages.append(stage_info[key])
 
-    print(f"    Found {len(stages)} Dockerfile stages with timing")
+    print(f"    Found {len(stages)} Dockerfile stages with timing (amd64 only)")
     return stages
 
 
