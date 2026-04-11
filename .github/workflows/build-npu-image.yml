@@ -79,6 +79,8 @@ jobs:
     needs: build-npu-image
     uses: ./.github/workflows/generate-build-report.yml
     with:
+      # Pass the parent workflow run ID so the report generator can access all jobs' logs
+      run_id: ${{ github.run_id }}
       output_artifact_name: 'sglang-npu-build-reports'
       retention_days: 30
     permissions:

@@ -71,22 +71,28 @@ def parse_dockerfile_log(log_content):
 
     #3 [1/8] FROM docker.io/python:3.11-slim
     #3 DONE 10.5s
+
+    #4 [2/8] RUN apt-get update
+    #4 0.123 Getting: http://...
+    #4 1.234 Get:1 http://...
+    #4 DONE 15.5s
     """
     stages = []
     stage_starts = {}
+    completed_stages = set()
 
     # Pattern for buildkit stage start: #N [...] command
     # Matches lines like:
     #   #1 [internal] load build definition from Dockerfile
     #   #2 [linux/amd64 internal] load metadata for ...
     #   #3 [1/8] FROM docker.io/python:3.11-slim
-    #   #3 0.123 resolve docker.io/python:3.11-slim
-    stage_pattern = r'^#(\d+)\s+(?:\[([^\]]*)\])?\s*(.*)'
+    #   #3 [2/8] RUN apt-get update
+    stage_pattern = r'^#(\d+)\s+\[([^\]]*)\]\s*(.+)'
 
     # Pattern for DONE line: #N DONE 1.234s
     done_pattern = r'^#(\d+)\s+DONE\s+(\d+\.\d+s)'
 
-    # Pattern to identify Dockerfile instruction type
+    # Pattern to identify Dockerfile instruction type from stage info like [1/8] FROM ...
     dockerfile_instructions = {
         'FROM': r'^FROM\s+',
         'RUN': r'^RUN\s+',
@@ -105,6 +111,7 @@ def parse_dockerfile_log(log_content):
     }
 
     lines = log_content.split('\n')
+    print(f"    Parsing {len(lines)} lines of log...")
 
     for line in lines:
         line = line.strip()
@@ -118,7 +125,7 @@ def parse_dockerfile_log(log_content):
             duration_str = done_match.group(2)
             duration_sec = float(duration_str.replace('s', ''))
 
-            if stage_num in stage_starts:
+            if stage_num in stage_starts and stage_num not in completed_stages:
                 stage_data = stage_starts[stage_num]
                 stages.append({
                     'stage_id': f"#{stage_num}",
@@ -129,44 +136,54 @@ def parse_dockerfile_log(log_content):
                     'duration': duration_sec,
                     'duration_formatted': format_duration(duration_sec)
                 })
+                completed_stages.add(stage_num)
             continue
 
-        # Check for stage start
+        # Check for stage start with [...] bracket
         stage_match = re.search(stage_pattern, line)
         if stage_match:
             stage_num = stage_match.group(1)
-            stage_info = stage_match.group(2).strip() if stage_match.group(2) else ''
+            stage_info = stage_match.group(2).strip()
             stage_cmd = stage_match.group(3).strip()
 
             # Skip if we already have a DONE for this stage
-            if stage_num in stage_starts and any(s['stage_id'] == f"#{stage_num}" for s in stages):
+            if stage_num in completed_stages:
                 continue
 
-            # Identify Dockerfile instruction type
+            # Skip if this is a continuation line (starts with stage_num followed by space and number)
+            # e.g., "#3 0.123 resolve ..." - this is a sub-line, not a new stage
+            if re.match(r'^#\d+\s+\d+\.\d+', line):
+                continue
+
+            # Identify Dockerfile instruction type from stage_info
+            # stage_info might be like "1/8" or "linux/amd64 internal" or "2/8] FROM ..."
             instruction_type = 'OTHER'
             instruction_detail = stage_cmd[:150]
 
-            # Check if stage_info contains a FROM instruction or [stage_num/total] FROM ...
-            if stage_info:
-                # Check for [1/8] FROM pattern
-                from_match = re.search(r'FROM\s+(\S+)', stage_info, re.IGNORECASE)
-                if from_match:
-                    instruction_type = 'FROM'
-                    instruction_detail = from_match.group(1)[:150]
-                else:
-                    for instr_type, pattern in dockerfile_instructions.items():
-                        if re.search(pattern, stage_info, re.IGNORECASE):
-                            instruction_type = instr_type
-                            instruction_detail = stage_info[:150]
-                            break
+            # Check if stage_info contains instruction like [2/8] RUN ...
+            for instr_type, pattern in dockerfile_instructions.items():
+                # Check in stage_info (e.g., "2/8] FROM docker.io/...")
+                if re.search(pattern, stage_info, re.IGNORECASE):
+                    instruction_type = instr_type
+                    match = re.search(pattern + r'(\S+)?', stage_info, re.IGNORECASE)
+                    if match and match.group(1):
+                        instruction_detail = match.group(1)[:150]
+                    else:
+                        instruction_detail = stage_info[:150]
+                    break
 
-            # If not found in stage_info, check stage_cmd
-            if instruction_type == 'OTHER' and stage_cmd:
+            # Also check stage_cmd if no instruction found
+            if instruction_type == 'OTHER':
                 for instr_type, pattern in dockerfile_instructions.items():
                     if re.search(pattern, stage_cmd, re.IGNORECASE):
                         instruction_type = instr_type
                         instruction_detail = stage_cmd[:150]
                         break
+
+            # Handle special cases
+            if 'internal' in stage_info.lower():
+                instruction_type = 'INTERNAL'
+                instruction_detail = stage_info
 
             stage_starts[stage_num] = {
                 'stage_info': stage_info,
@@ -175,7 +192,7 @@ def parse_dockerfile_log(log_content):
                 'instruction_detail': instruction_detail
             }
 
-    print(f"  Total: {len(stages)} Dockerfile stages found")
+    print(f"    Found {len(stages)} completed Dockerfile stages")
     return stages
 
 
@@ -223,17 +240,23 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
     jobs_url = f'https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs'
 
     print(f"Fetching jobs for run {run_id}...")
+    print(f"  API URL: {jobs_url}")
+
     while jobs_url:
         jobs_resp = requests.get(jobs_url, headers=headers)
         jobs_resp.raise_for_status()
         jobs_data = jobs_resp.json()
         new_jobs = jobs_data.get('jobs', [])
-        print(f"  Found {len(new_jobs)} jobs in this page (total: {len(all_jobs) + len(new_jobs)})")
+        print(f"  Found {len(new_jobs)} jobs in this page")
         all_jobs.extend(new_jobs)
         # Handle pagination
         jobs_url = jobs_resp.links.get('next', {}).get('url')
 
     print(f"Total jobs to process: {len(all_jobs)}")
+
+    # Print job names for debugging
+    for job in all_jobs:
+        print(f"  - Job: {job.get('name')} (ID: {job.get('id')}, Status: {job.get('status')})")
 
     build_report = {
         'workflow_name': run_data.get('name', 'Unknown'),
@@ -308,6 +331,22 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                 print(f"  Parsing logs for job '{job['job_name']}' ({len(log_content)} bytes)...")
                 dockerfile_stages = parse_dockerfile_log(log_content)
                 job_info['dockerfile_stages'] = dockerfile_stages
+                print(f"    Found {len(dockerfile_stages)} Dockerfile stages")
+
+                # Save raw log for debugging
+                safe_job_name = job['job_name'].replace('/', '-').replace('\\', '-').replace(' ', '_')
+                log_file = f'logs/job-{safe_job_name}-{job.get("id", "unknown")}.log'
+                os.makedirs(os.path.dirname(log_file), exist_ok=True)
+                with open(log_file, 'w', encoding='utf-8') as f:
+                    f.write(log_content)
+                print(f"    Log saved to {log_file}")
+
+                # Save parsed stages for debugging
+                if dockerfile_stages:
+                    stages_file = f'logs/stages-{safe_job_name}-{job.get("id", "unknown")}.json'
+                    with open(stages_file, 'w') as f:
+                        json.dump(dockerfile_stages, f, indent=2, ensure_ascii=False)
+                    print(f"    Stages saved to {stages_file}")
 
         build_report['jobs'].append(job_info)
 

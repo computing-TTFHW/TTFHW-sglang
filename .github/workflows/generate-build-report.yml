@@ -72,4 +72,5 @@ jobs:
           path: |
             build-report.json
             build-report.html
+            logs/
           retention-days: ${{ inputs.retention_days }}
