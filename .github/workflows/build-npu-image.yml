@@ -10,7 +10,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
+  # Ensure BuildKit outputs detailed progress logs
   BUILDKIT_PROGRESS: plain
+  DOCKER_BUILDKIT: 1
 
 jobs:
   build-npu-image:
