@@ -332,7 +332,8 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
         # Get job logs for Dockerfile parsing
         # GitHub returns workflow logs as a zip file with separate log files per job
         if job.get('status') == 'completed':
-            print(f"  Looking for Docker build output in job '{job['job_name']}'...")
+            job_name = job.get('name', 'Unknown')
+            print(f"  Looking for Docker build output in job '{job_name}'...")
 
             if run_id:
                 # Download workflow run logs (returns a zip file)
@@ -346,7 +347,7 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
 
                         # Find the log file for this job
                         # Job log filenames follow the pattern: {job_name}/{step_number}_{step_name}.txt
-                        job_name_safe = job['job_name'].replace(' ', '_')
+                        job_name_safe = job.get('name', 'Unknown').replace(' ', '_')
                         log_filename = None
 
                         for name in log_zip.namelist():
@@ -358,7 +359,7 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                         # If not found by name, try to find by pattern
                         if not log_filename:
                             for name in log_zip.namelist():
-                                if job['job_name'].replace(' ', '').lower() in name.lower():
+                                if job.get('name', '').replace(' ', '').lower() in name.lower():
                                     log_filename = name
                                     break
 
@@ -391,7 +392,7 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                                     print(f"    No BuildKit output found in this log file")
 
                                 # Save log for debugging
-                                safe_job_name = job['job_name'].replace('/', '-').replace(' ', '_')
+                                safe_job_name = job.get('name', 'Unknown').replace('/', '-').replace(' ', '_')
                                 log_file_path = f'logs/workflow-{safe_job_name}-{job.get("id", "unknown")}.log'
                                 os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
                                 with open(log_file_path, 'w', encoding='utf-8') as f:
@@ -478,11 +479,12 @@ def generate_html_report(report, output_dir='.'):
         status_class = f"status-{job.get('conclusion', 'pending')}"
         status_text = job.get('conclusion', 'unknown')
         duration = job.get('duration_formatted', 'N/A')
+        job_name = job.get('job_name', 'Unknown')
 
         job_html = f'''
         <div class="job-card">
             <div class="job-header">
-                <span class="job-name">{job['job_name']}</span>
+                <span class="job-name">{job_name}</span>
                 <div class="job-meta">
                     <span class="job-status {status_class}">{status_text}</span>
                     <span class="duration-badge">Duration: {duration}</span>
