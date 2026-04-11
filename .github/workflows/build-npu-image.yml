@@ -81,6 +81,9 @@ jobs:
     with:
       output_artifact_name: 'sglang-npu-build-reports'
       retention_days: 30
+    permissions:
+      contents: read
+      actions: read
 
   summary:
     name: Build Summary
