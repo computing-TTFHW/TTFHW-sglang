@@ -244,15 +244,21 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
     print(f"Fetching jobs for run {run_id}...")
     print(f"  API URL: {jobs_url}")
 
-    while jobs_url:
-        jobs_resp = requests.get(jobs_url, headers=headers)
-        jobs_resp.raise_for_status()
-        jobs_data = jobs_resp.json()
-        new_jobs = jobs_data.get('jobs', [])
-        print(f"  Found {len(new_jobs)} jobs in this page")
-        all_jobs.extend(new_jobs)
-        # Handle pagination
-        jobs_url = jobs_resp.links.get('next', {}).get('url')
+    try:
+        while jobs_url:
+            jobs_resp = requests.get(jobs_url, headers=headers)
+            jobs_resp.raise_for_status()
+            jobs_data = jobs_resp.json()
+            new_jobs = jobs_data.get('jobs', [])
+            print(f"  Found {len(new_jobs)} jobs in this page")
+            all_jobs.extend(new_jobs)
+            # Handle pagination
+            jobs_url = jobs_resp.links.get('next', {}).get('url')
+    except Exception as e:
+        print(f"Error fetching jobs: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
     print(f"Total jobs to process: {len(all_jobs)}")
 
@@ -398,6 +404,8 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                         print(f"    Response is not a valid zip file")
                     except Exception as e:
                         print(f"    Error processing workflow logs: {e}")
+                        import traceback
+                        traceback.print_exc()
                 else:
                     print(f"    Could not get workflow logs: HTTP {workflow_log_resp.status_code}")
 
@@ -636,15 +644,21 @@ def main():
         print("Optional: OUTPUT_DIR (default: '.')")
         exit(1)
 
-    print(f"Generating build report for run {run_id} in {repo}...")
+    try:
+        print(f"Generating build report for run {run_id} in {repo}...")
 
-    # Generate JSON report
-    report = generate_build_report(gh_token, run_id, repo, output_dir)
+        # Generate JSON report
+        report = generate_build_report(gh_token, run_id, repo, output_dir)
 
-    # Generate HTML report
-    generate_html_report(report, output_dir)
+        # Generate HTML report
+        generate_html_report(report, output_dir)
 
-    print("Build report generation complete!")
+        print("Build report generation complete!")
+    except Exception as e:
+        print(f"FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
 
 
 if __name__ == '__main__':
