@@ -72,14 +72,14 @@ def parse_dockerfile_log(log_content):
     lines = log_content.split('\n')
     print(f"    Parsing {len(lines)} lines of log...")
 
-    # Pattern 1: timestampZ #N DONE X.Xs
-    done_pattern = regex.compile(r'\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+DONE\s+(\d+\.\d+s)')
+    # Pattern 1: timestampZ #N DONE X.Xs  (match from start of line)
+    done_pattern = regex.compile(r'^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+DONE\s+(\d+\.\d+s)', regex.MULTILINE)
 
-    # Pattern 2: timestampZ #N [...] (with bracket)
-    bracket_pattern = regex.compile(r'\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+\[([^\]]+)\]\s*(.+)')
+    # Pattern 2: timestampZ #N [...] (with bracket) - match from start of line
+    bracket_pattern = regex.compile(r'^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+\[([^\]]+)\]\s*(.+)', regex.MULTILINE)
 
-    # Pattern 3: timestampZ #N (without bracket) - catch remaining lines
-    simple_pattern = regex.compile(r'\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+(\S.*)$')
+    # Pattern 3: timestampZ #N (without bracket) - match from start of line
+    simple_pattern = regex.compile(r'^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+(\S.*)$', regex.MULTILINE)
 
     # First pass: find all DONE lines and their times
     done_times = {}
@@ -125,9 +125,12 @@ def parse_dockerfile_log(log_content):
 
         # Skip if we already processed this stage number
         if stage_num in seen_stage_nums:
-            print(f"    [SKIP DUP] #{stage_num} at line {idx}: {line[:80]}")
+            print(f"    [SKIP DUP] #{stage_num} at line {idx}: {line[:100]}")
             continue
         seen_stage_nums.add(stage_num)
+
+        # Print the full line for debugging
+        print(f"    [PARSE] Line {idx}: {line[:120]}")
 
         # Get duration from done_times
         duration = done_times.get(stage_num)
@@ -343,18 +346,35 @@ def generate_build_report(gh_token, run_id, repo='', output_dir='.'):
                         # Store all log file names for this job in job_info
                         job_info['log_files'] = all_log_files
 
-                        # Find log files that contain Docker BuildKit output
-                        # Skip files with 'system' in the name (GitHub system logs)
+                        # Find log files for THIS job only
+                        # GitHub log file naming: {step_num}_{job_name}.txt
+                        # e.g., "0_build (8.5.0, 910b).txt" for job "build-npu-image (8.5.0, 910b)"
+                        # Extract matrix values from job name (e.g., "8.5.0" and "910b" from "build-npu-image (8.5.0, 910b)")
+                        import re
+                        matrix_matches = re.findall(r'\(([^)]+)\)', job_name)
+                        matrix_values = matrix_matches[0].split(', ') if matrix_matches else []
+
                         target_files = []
                         for name in log_zip.namelist():
                             if name.endswith('.txt') and 'system' not in name.lower():
-                                target_files.append(name)
+                                # Check if all matrix values are in the filename
+                                if matrix_values and all(val in name for val in matrix_values):
+                                    target_files.append(name)
+                                    break  # Found the log file for this job
 
-                        print(f"    Found {len(target_files)} log files to check (excluding system logs)")
+                        # Fallback: try matching by job name
+                        if not target_files:
+                            for name in log_zip.namelist():
+                                if name.endswith('.txt') and 'system' not in name.lower():
+                                    if job_name in name:
+                                        target_files.append(name)
+                                        break
 
-                        # Parse each log file and look for build output
-                        # Use dict to deduplicate by stage_num across multiple log files
-                        all_stages_dict = {}
+                        print(f"    Found {len(target_files)} log file(s) for job '{job_name}' (matrix: {matrix_values})")
+
+                        # Parse log file(s) for this job only
+                        # Each job has its own stages - no dedup needed across files
+                        dockerfile_stages = []
                         for log_filename in target_files:
                             print(f"    ========== Processing log file: {log_filename} ==========")
                             try:
@@ -383,13 +403,7 @@ def generate_build_report(gh_token, run_id, repo='', output_dir='.'):
                                         stages = parse_dockerfile_log(log_content)
                                         if stages:
                                             print(f"      ✓ Parsed {len(stages)} Dockerfile stages")
-                                            # Deduplicate by stage_num
-                                            for stage in stages:
-                                                stage_num = stage['stage_id'].replace('#', '')
-                                                if stage_num not in all_stages_dict:
-                                                    all_stages_dict[stage_num] = stage
-                                                else:
-                                                    print(f"      [SKIP] Stage #{stage_num} already exists, skipping duplicate")
+                                            dockerfile_stages.extend(stages)
                                         else:
                                             print(f"      ✗ No stages parsed (check debug output above)")
                                     else:
@@ -399,8 +413,7 @@ def generate_build_report(gh_token, run_id, repo='', output_dir='.'):
                                 import traceback
                                 traceback.print_exc()
 
-                        # Convert dict to list
-                        dockerfile_stages = list(all_stages_dict.values())
+                        # Sort stages by stage number
                         dockerfile_stages.sort(key=lambda x: int(x['stage_id'].replace('#', '')))
 
                         if dockerfile_stages:
