@@ -56,12 +56,16 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
     """
     Parse Buildkit log to extract Dockerfile stage timings.
 
-    Log format:
+    Match ALL lines with format: timestampZ #N ...
+    Examples:
     2026-04-10T09:06:45.2770303Z #1 [internal] booting buildkit
     2026-04-10T09:06:48.2219463Z #1 DONE 2.9s
 
     2026-04-10T09:06:50.3871078Z #5 [linux/amd64  1/12] FROM quay.io/...
     2026-04-10T09:08:37.1662964Z #5 DONE 106.7s
+
+    2026-04-10T09:54:11.4655416Z #34 resolving provenance for metadata file
+    2026-04-10T09:54:11.4736616Z #34 DONE 0.0s
     """
     import re as regex
     stages = []
@@ -69,13 +73,14 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
     lines = log_content.split('\n')
     print(f"    Parsing {len(lines)} lines of log...")
 
-    # Pattern: timestampZ #N [...] command
-    # e.g., 2026-04-10T09:06:45.2770303Z #1 [linux/amd64  1/12] FROM ...
-    stage_pattern = regex.compile(r'\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+\[([^\]]+)\]\s*(.+)')
-
-    # Pattern for DONE: timestampZ #N DONE X.Xs
-    # e.g., 2026-04-10T09:08:37.1662964Z #5 DONE 106.7s
+    # Pattern 1: timestampZ #N DONE X.Xs
     done_pattern = regex.compile(r'\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+DONE\s+(\d+\.\d+s)')
+
+    # Pattern 2: timestampZ #N [...] (with bracket)
+    bracket_pattern = regex.compile(r'\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+\[([^\]]+)\]\s*(.+)')
+
+    # Pattern 3: timestampZ #N (without bracket) - catch remaining lines
+    simple_pattern = regex.compile(r'\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+(\S.*)$')
 
     # Track stages by stage number
     stage_info = {}
@@ -97,70 +102,75 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
     # Second pass: find all stage start lines
     seen_keys = set()
     for line in lines:
-        match = stage_pattern.search(line)
+        stage_num = None
+        bracket = None
+        command = None
+
+        # Try bracket pattern first
+        match = bracket_pattern.search(line)
         if match:
             stage_num = match.group(1)
-            bracket = match.group(2).strip()  # e.g., "linux/amd64  1/12" or "internal"
+            bracket = match.group(2).strip()
             command = match.group(3).strip()
+        else:
+            # Try simple pattern (no bracket)
+            match = simple_pattern.search(line)
+            if match:
+                stage_num = match.group(1)
+                bracket = ''
+                command = match.group(2).strip()
+                # Skip DONE lines in simple pattern
+                if 'DONE' in command:
+                    continue
 
-            # Extract platform and step info from bracket
-            # Format: "linux/amd64  1/12" or "linux/amd64 1/12" or "internal"
+        if stage_num is None:
+            continue
+
+        # Create unique key
+        key = f"{stage_num}"
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+
+        # Get duration from done_times
+        duration = done_times.get(stage_num)
+
+        # Extract instruction type
+        if bracket and bracket in ['auth', 'internal', 'exporting', 'sending', 'writing']:
+            instruction = bracket.upper()
+        elif bracket:
+            # Extract from command or bracket
             step_match = regex.search(r'(\d+)/(\d+)', bracket)
             if step_match:
-                step_num = step_match.group(1)
-                total_steps = step_match.group(2)
-                platform = bracket[:step_match.start()].strip()
+                cmd_part = bracket[step_match.end():].strip()
+                instr_match = regex.match(r'^(\w+)', cmd_part)
+                instruction = instr_match.group(1).upper() if instr_match else 'OTHER'
             else:
-                step_num = None
-                total_steps = None
-                platform = bracket
-
-            # Create unique key with platform
-            key = f"{stage_num}_{platform}"
-
-            # Skip if we already have this stage
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-
-            # Get duration from done_times
-            duration = done_times.get(stage_num)
-
-            # Extract instruction type from command
+                instr_match = regex.match(r'^(\w+)', command)
+                instruction = instr_match.group(1).upper() if instr_match else 'OTHER'
+        else:
             instr_match = regex.match(r'^(\w+)', command)
             instruction = instr_match.group(1).upper() if instr_match else 'OTHER'
 
-            if duration is not None:
-                stage_info[key] = {
-                    'stage_id': f"#{stage_num}",
-                    'platform': platform,
-                    'step': f"[{step_num}/{total_steps}]" if step_num else '',
-                    'instruction_type': instruction,
-                    'instruction_detail': command[:100],
-                    'stage_info': bracket,
-                    'command': command,
-                    'duration': duration,
-                    'duration_formatted': format_duration(duration),
-                    'source_line': line[:150]
-                }
-                print(f"    [FOUND] #{stage_num} [{bracket}] {instruction} -> {duration:.1f}s")
+        if duration is not None:
+            step_match = regex.search(r'(\d+)/(\d+)', bracket) if bracket else None
+            stage_info[key] = {
+                'stage_id': f"#{stage_num}",
+                'platform': bracket.split()[0] if bracket and 'amd64' in bracket or 'arm64' in bracket else '',
+                'step': f"[{step_match.group(1)}/{step_match.group(2)}]" if step_match else '',
+                'instruction_type': instruction,
+                'instruction_detail': command[:100] if command else bracket,
+                'stage_info': bracket,
+                'command': command if command else bracket,
+                'duration': duration,
+                'duration_formatted': format_duration(duration),
+                'source_line': line[:150]
+            }
+            bracket_str = f"[{bracket}]" if bracket else ""
+            print(f"    [FOUND] #{stage_num} {bracket_str} {command[:50] if command else ''} -> {duration:.1f}s")
 
-    # Build final list sorted by step number then stage number
-    def sort_key(k):
-        info = stage_info[k]
-        step = info.get('step', '[0/0]')
-        step_match = regex.search(r'(\d+)/(\d+)', step)
-        platform = info.get('platform', '')
-        # Sort by step number, then by stage number, amd64 before arm64
-        if step_match:
-            step_num = int(step_match.group(1))
-        else:
-            step_num = 999
-        stage_num = int(k.split('_')[0])
-        platform_order = 0 if 'amd64' in platform else (1 if 'arm64' in platform else 2)
-        return (step_num, stage_num, platform_order)
-
-    for key in sorted(stage_info.keys(), key=sort_key):
+    # Build final list sorted by stage number
+    for key in sorted(stage_info.keys(), key=lambda x: int(x)):
         stages.append(stage_info[key])
 
     print(f"    Final: {len(stages)} stages with timing")
