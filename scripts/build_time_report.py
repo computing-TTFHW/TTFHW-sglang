@@ -661,34 +661,16 @@ def generate_html_report(report, output_dir='.'):
             </div>
         '''
 
-        # Show log files found in the zip
-        log_files = job.get('found_log_files', [])
-        if log_files:
-            job_html += f'''
-            <div class="stages-section">
-                <h3>Log Files Found in Workflow Zip ({len(log_files)} files)</h3>
-                <p style="font-size: 12px; color: #8b949e; margin-bottom: 10px;">
-                    These log files are saved to <code style="background: #161b22; padding: 2px 6px; border-radius: 4px;">logs/full-*.txt</code> for debugging
-                </p>
-                <ul style="font-family: monospace; font-size: 11px; color: #8b949e;">
-            '''
-            for lf in log_files[:30]:  # Show max 30 files
-                # Escape special HTML characters
-                lf_escaped = lf.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                job_html += f'<li>{lf_escaped}</li>'
-            if len(log_files) > 30:
-                job_html += f'<li>... and {len(log_files) - 30} more</li>'
-            job_html += '''
-                </ul>
-            </div>
-            '''
-
-        # Dockerfile Stages
+        # Dockerfile Stages - show under "Build and push Docker image" step
         dockerfile_stages = job.get('dockerfile_stages', [])
         if dockerfile_stages:
             job_html += f'''
-            <div class="stages-section">
-                <h3>Dockerfile Build Stages ({len(dockerfile_stages)} stages)</h3>
+            <div class="stages-section" style="margin-top: 20px;">
+                <details style="background: #161b22; border-radius: 6px; padding: 15px; border: 1px solid #30363d;">
+                    <summary style="cursor: pointer; font-weight: 600; color: #58a6ff; margin-bottom: 15px;">
+                        🔽 Dockerfile Build Stages ({len(dockerfile_stages)} stages) - Click to expand
+                    </summary>
+                    <div style="margin-top: 15px;">
             '''
 
             for stage in dockerfile_stages:
@@ -698,22 +680,33 @@ def generate_html_report(report, output_dir='.'):
                 stage_duration = stage.get('duration_formatted', 'N/A')
                 instr_type = stage.get('instruction_type', 'OTHER')
                 instr_detail = stage.get('instruction_detail', '')
+                platform = stage.get('platform', '')
+
+                # Add platform badge
+                platform_badge = ''
+                if 'amd64' in platform:
+                    platform_badge = '<span class="instruction-type instr-AMD64" style="background: #238636;">amd64</span>'
+                elif 'arm64' in platform:
+                    platform_badge = '<span class="instruction-type instr-ARM64" style="background: #db6d28;">arm64</span>'
 
                 job_html += f'''
-                <div class="stage-card">
-                    <div class="stage-header">
-                        <div>
-                            <span class="stage-id">{stage_id}</span>
-                            <span class="instruction-type instr-{instr_type}">{instr_type}</span>
-                            <span class="stage-info">{stage_info}</span>
+                <div class="stage-card" style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 15px; margin-bottom: 10px;">
+                    <div class="stage-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                            <span class="stage-id" style="background: #1f6feb; color: #f0f6fc; padding: 2px 8px; border-radius: 4px; font-family: monospace; font-size: 12px;">{stage_id}</span>
+                            <span class="instruction-type instr-{instr_type}" style="padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700;">{instr_type}</span>
+                            {platform_badge}
+                            <span class="stage-info" style="color: #58a6ff; font-size: 13px;">{stage_info}</span>
                         </div>
-                        <span class="stage-duration">{stage_duration}</span>
+                        <span class="stage-duration" style="font-size: 16px; font-weight: 700; color: #7ee787;">{stage_duration}</span>
                     </div>
-                    <div class="stage-command">{instr_detail}</div>
+                    <div class="stage-command" style="color: #8b949e; font-family: monospace; font-size: 12px; background: #161b22; padding: 8px 12px; border-radius: 4px; overflow-x: auto;">{instr_detail}</div>
                 </div>
                 '''
 
             job_html += '''
+                    </div>
+                </details>
             </div>
             '''
 
