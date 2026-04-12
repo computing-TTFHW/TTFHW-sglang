@@ -81,9 +81,6 @@ def parse_dockerfile_log(log_content):
     # Pattern 3: timestampZ #N (without bracket) - catch remaining lines
     simple_pattern = regex.compile(r'\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+(\S.*)$')
 
-    # Track stages by stage number
-    stage_info = {}
-
     # First pass: find all DONE lines and their times
     done_times = {}
     for line in lines:
@@ -98,8 +95,9 @@ def parse_dockerfile_log(log_content):
     for sn, t in sorted(done_times.items(), key=lambda x: int(x[0])):
         print(f"      #{sn}: {t:.1f}s")
 
-    # Second pass: find all stage start lines
-    seen_keys = set()
+    # Second pass: find the FIRST start line for each stage number
+    # Each stage number appears only once as a start line
+    seen_stage_nums = set()
     for line in lines:
         stage_num = None
         bracket = None
@@ -125,21 +123,29 @@ def parse_dockerfile_log(log_content):
         if stage_num is None:
             continue
 
-        # Create unique key
-        key = f"{stage_num}"
-        if key in seen_keys:
+        # Skip if we already processed this stage number
+        if stage_num in seen_stage_nums:
             continue
-        seen_keys.add(key)
+        seen_stage_nums.add(stage_num)
 
         # Get duration from done_times
         duration = done_times.get(stage_num)
+
+        # Extract platform and step info from bracket (e.g., "linux/amd64 5/12")
+        platform = ''
+        step_info = ''
+        step_match = regex.search(r'(\d+)/(\d+)', bracket) if bracket else None
+        if step_match:
+            step_info = f"[{step_match.group(1)}/{step_match.group(2)}]"
+            # Platform is before the step info
+            platform_part = bracket[:step_match.start()].strip()
+            platform = platform_part.split()[0] if platform_part else ''
 
         # Extract instruction type
         if bracket and bracket in ['auth', 'internal', 'exporting', 'sending', 'writing']:
             instruction = bracket.upper()
         elif bracket:
             # Extract from command or bracket
-            step_match = regex.search(r'(\d+)/(\d+)', bracket)
             if step_match:
                 cmd_part = bracket[step_match.end():].strip()
                 instr_match = regex.match(r'^(\w+)', cmd_part)
@@ -152,11 +158,10 @@ def parse_dockerfile_log(log_content):
             instruction = instr_match.group(1).upper() if instr_match else 'OTHER'
 
         if duration is not None:
-            step_match = regex.search(r'(\d+)/(\d+)', bracket) if bracket else None
-            stage_info[key] = {
+            stage_data = {
                 'stage_id': f"#{stage_num}",
-                'platform': bracket.split()[0] if bracket and 'amd64' in bracket or 'arm64' in bracket else '',
-                'step': f"[{step_match.group(1)}/{step_match.group(2)}]" if step_match else '',
+                'platform': platform,
+                'step': step_info,
                 'instruction_type': instruction,
                 'instruction_detail': command[:100] if command else bracket,
                 'stage_info': bracket,
@@ -167,10 +172,10 @@ def parse_dockerfile_log(log_content):
             }
             bracket_str = f"[{bracket}]" if bracket else ""
             print(f"    [FOUND] #{stage_num} {bracket_str} {command[:50] if command else ''} -> {duration:.1f}s")
+            stages.append(stage_data)
 
     # Build final list sorted by stage number
-    for key in sorted(stage_info.keys(), key=lambda x: int(x)):
-        stages.append(stage_info[key])
+    stages.sort(key=lambda x: int(x['stage_id'].replace('#', '')))
 
     print(f"    Final: {len(stages)} stages with timing")
     return stages
