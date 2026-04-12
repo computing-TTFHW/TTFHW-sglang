@@ -51,7 +51,7 @@ def format_duration(seconds):
         return f"{hours}h {mins}m"
 
 
-def parse_dockerfile_log(log_content, dockerfile_content=None):
+def parse_dockerfile_log(log_content):
     """
     Parse Buildkit log to extract Dockerfile stage timings.
 
@@ -176,78 +176,15 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
     return stages
 
 
-def download_and_parse_dockerfile(repo, gh_token):
+def generate_build_report(gh_token, run_id, repo='', output_dir='.'):
+    """Generate build time report from GitHub Actions workflow run.
+
+    Args:
+        gh_token: GitHub token for API access
+        run_id: Workflow run ID to analyze
+        repo: Repository name (e.g., 'owner/repo'). If empty, auto-detect from run_id
+        output_dir: Output directory for reports
     """
-    Download npu.Dockerfile from sglang community repo and parse instructions.
-    """
-    import requests as req
-    dockerfile_url = "https://raw.githubusercontent.com/sgl-project/sglang/main/docker/npu.Dockerfile"
-
-    try:
-        headers = {'Authorization': f'token {gh_token}'}
-        resp = req.get(dockerfile_url, headers=headers, timeout=30)
-        if resp.status_code == 200:
-            content = resp.text
-            print(f"  Downloaded Dockerfile ({len(content)} bytes)")
-            instructions = parse_dockerfile_for_instructions_from_content(content)
-            return content, instructions
-        else:
-            print(f"  Failed to download Dockerfile: HTTP {resp.status_code}")
-    except Exception as e:
-        print(f"  Error downloading Dockerfile: {e}")
-
-    return None, []
-
-
-def parse_dockerfile_for_instructions_from_content(content):
-    """
-    Parse Dockerfile content to extract instructions in order.
-    Returns list of (instruction_type, command) tuples.
-    """
-    import re as regex
-    instructions = []
-
-    # Match lines starting with instruction keywords
-    instruction_pattern = regex.compile(r'^(ARG|FROM|RUN|COPY|ADD|ENV|LABEL|WORKDIR|EXPOSE|CMD|ENTRYPOINT|USER|VOLUME|SHELL)\s+(.+)', regex.IGNORECASE | regex.MULTILINE)
-
-    for match in instruction_pattern.finditer(content):
-        instr_type = match.group(1).upper()
-        command = match.group(2)[:100]
-        instructions.append((instr_type, command))
-
-    print(f"    Found {len(instructions)} instructions in Dockerfile")
-    return instructions
-
-
-def parse_dockerfile_for_instructions(dockerfile_path):
-    """
-    Parse Dockerfile to extract instructions in order.
-    Returns list of (instruction_type, command) tuples.
-    """
-    import re as regex
-    instructions = []
-
-    try:
-        with open(dockerfile_path, 'r') as f:
-            content = f.read()
-    except FileNotFoundError:
-        print(f"    Dockerfile not found: {dockerfile_path}")
-        return instructions
-
-    # Match lines starting with instruction keywords
-    instruction_pattern = regex.compile(r'^(ARG|FROM|RUN|COPY|ADD|ENV|LABEL|WORKDIR|EXPOSE|CMD|ENTRYPOINT|USER|VOLUME|SHELL)\s+(.+)', regex.IGNORECASE | regex.MULTILINE)
-
-    for match in instruction_pattern.finditer(content):
-        instr_type = match.group(1).upper()
-        command = match.group(2)[:100]
-        instructions.append((instr_type, command))
-
-    print(f"    Found {len(instructions)} instructions in Dockerfile")
-    return instructions
-
-
-def generate_build_report(gh_token, run_id, repo, output_dir='.'):
-    """Generate build time report from GitHub Actions workflow run."""
 
     headers = {
         'Authorization': f'token {gh_token}',
@@ -255,19 +192,26 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
     }
 
     # Get workflow run info
-    run_url = f'https://api.github.com/repos/{repo}/actions/runs/{run_id}'
+    # If repo is not provided, auto-detect from the run_id's workflow run
+    if repo:
+        run_url = f'https://api.github.com/repos/{repo}/actions/runs/{run_id}'
+    else:
+        # First, get the run to find out which repo it belongs to
+        run_url = f'https://api.github.com/repos/OWNER_PLACEHOLDER/actions/runs/{run_id}'
+
     run_resp = requests.get(run_url, headers=headers)
     run_resp.raise_for_status()
     run_data = run_resp.json()
 
-    # Download and parse Dockerfile from sglang community repo
-    print("Downloading npu.Dockerfile from sglang repo...")
-    dockerfile_content, dockerfile_instructions = download_and_parse_dockerfile(repo, gh_token)
-    print(f"  Dockerfile instructions: {len(dockerfile_instructions)}")
-    for instr_type, cmd in dockerfile_instructions[:10]:
-        print(f"    - {instr_type}: {cmd[:50]}")
-    if len(dockerfile_instructions) > 10:
-        print(f"    ... and {len(dockerfile_instructions) - 10} more")
+    # Auto-detect repo from run_data if not provided
+    if not repo:
+        repo = run_data.get('repository', {}).get('full_name', '')
+        if not repo:
+            raise ValueError(f"Could not auto-detect repository from run_id {run_id}")
+        print(f"Auto-detected repository: {repo}")
+
+    # Update run_url with the correct repo
+    run_url = f'https://api.github.com/repos/{repo}/actions/runs/{run_id}'
 
     # Get all jobs for this run (with pagination support)
     all_jobs = []
@@ -389,65 +333,14 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                         # Store all log file names for this job in job_info
                         job_info['log_files'] = all_log_files
 
-                        # Find log files for this job
-                        # GitHub log file naming pattern: {step_num}_{job_name}.txt
-                        # e.g., "0_build-npu-image (8.5.0, 910b).txt"
-                        job_id_str = str(job_id)
+                        # Find log files that contain Docker BuildKit output
+                        # Skip files with 'system' in the name (GitHub system logs)
                         target_files = []
-                        found_log_files = []  # Store found log files for this job
-
-                        # Strategy 1: Match by job name (with or without step number prefix)
-                        # Pattern: {num}_{job_name}.txt or {job_name}.txt
                         for name in log_zip.namelist():
-                            if name.endswith('.txt'):
-                                # Remove step number prefix like "0_" or "1_"
-                                name_without_prefix = name
-                                if name[0].isdigit() and '_' in name:
-                                    name_without_prefix = name.split('_', 1)[1]
+                            if name.endswith('.txt') and 'system' not in name.lower():
+                                target_files.append(name)
 
-                                # Check if job name matches
-                                if job_name in name or job_name in name_without_prefix:
-                                    target_files.append(name)
-                                    found_log_files.append(name)
-
-                        # Strategy 2: Match by job ID in path
-                        if not target_files:
-                            for name in log_zip.namelist():
-                                if f'_{job_id_str}/' in name or name.startswith(f'{job_name}_'):
-                                    target_files.append(name)
-                                    found_log_files.append(name)
-
-                        # Strategy 3: Look for files containing "build" and job matrix values
-                        if not target_files:
-                            # Extract matrix values from job name (e.g., "8.5.0" and "910b" or "a3")
-                            import re
-                            matrix_matches = re.findall(r'\(([^)]+)\)', job_name)
-                            if matrix_matches:
-                                matrix_values = matrix_matches[0].split(', ')
-                                for name in log_zip.namelist():
-                                    if name.endswith('.txt'):
-                                        # Check if all matrix values are in the filename
-                                        if all(val in name for val in matrix_values):
-                                            target_files.append(name)
-                                            found_log_files.append(name)
-
-                        # Strategy 4: Look for any file containing "build"
-                        if not target_files:
-                            for name in log_zip.namelist():
-                                lower_name = name.lower()
-                                if 'build' in lower_name and name.endswith('.txt'):
-                                    target_files.append(name)
-                                    found_log_files.append(name)
-
-                        # Last resort: try all .txt files
-                        if not target_files:
-                            target_files = [n for n in log_zip.namelist() if n.endswith('.txt')]
-                            found_log_files = target_files[:5]  # Limit to first 5
-
-                        print(f"    Found {len(target_files)} potential log files for this job")
-
-                        # Store found log files in job_info for HTML display
-                        job_info['found_log_files'] = found_log_files
+                        print(f"    Found {len(target_files)} log files to check (excluding system logs)")
 
                         # Parse each log file and look for build output
                         dockerfile_stages = []
@@ -476,8 +369,7 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
 
                                     if has_buildkit:
                                         print(f"      BuildKit output detected")
-                                        # Pass dockerfile_content to parser for better matching
-                                        stages = parse_dockerfile_log(log_content, dockerfile_content)
+                                        stages = parse_dockerfile_log(log_content)
                                         if stages:
                                             print(f"      ✓ Parsed {len(stages)} Dockerfile stages")
                                             dockerfile_stages.extend(stages)
@@ -491,10 +383,11 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                                 traceback.print_exc()
 
                         if dockerfile_stages:
-                            # Find the "Build and push Docker image" step and attach stages to it
+                            # Find the "Build and push Docker image" step
                             dockerbuild_step_idx = None
+
                             for idx, step in enumerate(job_info['steps']):
-                                if 'Build and push Docker image' in step.get('name', ''):
+                                if step.get('name', '') == 'Build and push Docker image':
                                     dockerbuild_step_idx = idx
                                     break
 
@@ -714,17 +607,22 @@ def main():
     """Main entry point."""
     gh_token = os.environ.get('GH_TOKEN')
     run_id = os.environ.get('RUN_ID')
-    repo = os.environ.get('REPO')
+    # repo is optional: if not provided, use the repository from the run_id's workflow run
+    repo = os.environ.get('REPO', '')
     output_dir = os.environ.get('OUTPUT_DIR', '.')
 
-    if not all([gh_token, run_id, repo]):
+    if not all([gh_token, run_id]):
         print("Error: Missing required environment variables")
-        print("Required: GH_TOKEN, RUN_ID, REPO")
-        print("Optional: OUTPUT_DIR (default: '.')")
+        print("Required: GH_TOKEN, RUN_ID")
+        print("Optional: REPO (default: auto-detect from run_id), OUTPUT_DIR (default: '.')")
         exit(1)
 
     try:
-        print(f"Generating build report for run {run_id} in {repo}...")
+        print(f"Generating build report for run {run_id}...")
+        if repo:
+            print(f"  Repository: {repo}")
+        else:
+            print(f"  Repository: auto-detect from run_id")
 
         # Generate JSON report
         report = generate_build_report(gh_token, run_id, repo, output_dir)

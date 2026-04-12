@@ -83,6 +83,7 @@ jobs:
     with:
       # Pass the parent workflow run ID so the report generator can access all jobs' logs
       run_id: ${{ github.run_id }}
+      repo: ${{ github.repository }}
       output_artifact_name: 'sglang-npu-build-reports'
       retention_days: 30
     permissions:

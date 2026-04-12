@@ -7,6 +7,10 @@ on:
         description: 'Workflow run ID to analyze'
         required: false
         type: string
+      repo:
+        description: 'Repository to analyze (e.g., owner/repo). If empty, auto-detect from run_id'
+        required: false
+        type: string
       output_artifact_name:
         description: 'Name of the artifact to upload'
         required: false
@@ -22,6 +26,10 @@ on:
       run_id:
         description: 'Workflow run ID to analyze'
         required: true
+        type: string
+      repo:
+        description: 'Repository to analyze (e.g., owner/repo). If empty, auto-detect from run_id'
+        required: false
         type: string
       output_artifact_name:
         description: 'Name of the artifact to upload'
@@ -58,9 +66,8 @@ jobs:
       - name: Generate build time report
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Use provided run_id or fall back to current workflow run_id
           RUN_ID: ${{ inputs.run_id || github.run_id }}
-          REPO: ${{ github.repository }}
+          REPO: ${{ inputs.repo || '' }}
           OUTPUT_DIR: '.'
         run: |
           python scripts/build_time_report.py

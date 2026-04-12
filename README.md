@@ -113,6 +113,52 @@ jobs:
       retention_days: 30
 ```
 
+#### 方式 3: 分析其他仓库的 Action
+
+构建报告工作流支持配置参数，可用于分析其他仓库的类似 Docker 构建 Action：
+
+**从当前仓库分析:**
+```yaml
+jobs:
+  generate-report:
+    needs: my-build-job
+    uses: ./.github/workflows/generate-build-report.yml
+    with:
+      run_id: ${{ github.run_id }}
+      output_artifact_name: 'my-build-reports'
+      retention_days: 30
+```
+
+**分析其他仓库:**
+```yaml
+jobs:
+  generate-report:
+    uses: ./.github/workflows/generate-build-report.yml
+    with:
+      run_id: '1234567890'       # 目标仓库的 workflow run ID
+      repo: 'owner/repo'         # 目标仓库名称
+      output_artifact_name: 'my-build-reports'
+```
+
+### 配置参数说明
+
+| 参数名 | 说明 | 默认值 |
+|--------|------|--------|
+| `run_id` | 要分析的 workflow run ID | 无 (必需) |
+| `repo` | 要分析的仓库 (格式：owner/repo)。如果为空，自动从 run_id 检测 | 自动检测 |
+| `output_artifact_name` | 输出 artifact 名称 | `build-reports` |
+| `retention_days` | Artifact 保留天数 | `30` |
+
+### 复用本工作流到其他仓库
+
+如果你想将此工作流用于其他仓库的 Docker 构建分析：
+
+1. 复制 `.github/workflows/generate-build-report.yml` 到你的仓库
+2. 复制 `scripts/build_time_report.py` 到你的仓库
+3. 复制 `scripts/report_templates/report_template.html` 到你的仓库
+4. 根据你的需求调整参数（步骤关键词等）
+5. 在你的构建工作流中调用 `generate-build-report.yml`
+
 ## 使用方法
 
 ### 前置条件
