@@ -14,7 +14,6 @@ import zipfile
 import io
 import requests
 from datetime import datetime
-from collections import defaultdict
 
 
 # ANSI escape code pattern
@@ -245,31 +244,6 @@ def parse_dockerfile_for_instructions(dockerfile_path):
 
     print(f"    Found {len(instructions)} instructions in Dockerfile")
     return instructions
-
-
-def analyze_dockerfile_stages(stages):
-    """
-    Analyze Dockerfile stages and group by instruction type.
-
-    Returns statistics about each instruction type.
-    """
-    by_type = defaultdict(list)
-    for stage in stages:
-        instr_type = stage.get('instruction_type', 'OTHER')
-        by_type[instr_type].append(stage)
-
-    analysis = {}
-    for instr_type, type_stages in by_type.items():
-        total_duration = sum(s.get('duration', 0) for s in type_stages)
-        analysis[instr_type] = {
-            'count': len(type_stages),
-            'total_duration': total_duration,
-            'total_duration_formatted': format_duration(total_duration),
-            'avg_duration': total_duration / len(type_stages) if type_stages else 0,
-            'stages': type_stages
-        }
-
-    return analysis
 
 
 def generate_build_report(gh_token, run_id, repo, output_dir='.'):
@@ -517,7 +491,21 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
                                 traceback.print_exc()
 
                         if dockerfile_stages:
-                            job_info['dockerfile_stages'] = dockerfile_stages
+                            # Find the "Build and push Docker image" step and attach stages to it
+                            dockerbuild_step_idx = None
+                            for idx, step in enumerate(job_info['steps']):
+                                if 'Build and push Docker image' in step.get('name', ''):
+                                    dockerbuild_step_idx = idx
+                                    break
+
+                            if dockerbuild_step_idx is not None:
+                                job_info['steps'][dockerbuild_step_idx]['dockerfile_stages'] = dockerfile_stages
+                                print(f"  Attached {len(dockerfile_stages)} Dockerfile stages to step 'Build and push Docker image'")
+                            else:
+                                # Fallback: attach to job if step not found
+                                job_info['dockerfile_stages'] = dockerfile_stages
+                                print(f"  'Build and push Docker image' step not found, attached to job")
+
                             print(f"  Total: Found {len(dockerfile_stages)} Dockerfile stages for this job")
 
                             # Save parsed stages for debugging
@@ -545,20 +533,11 @@ def generate_build_report(gh_token, run_id, repo, output_dir='.'):
     # Calculate summary statistics
     all_stages = [s for j in build_report['jobs'] for s in j.get('dockerfile_stages', [])]
 
-    # Analyze Dockerfile stages by instruction type
-    dockerfile_analysis = analyze_dockerfile_stages(all_stages)
-
     build_report['summary'] = {
         'total_jobs': len(build_report['jobs']),
         'successful_jobs': sum(1 for j in build_report['jobs'] if j.get('conclusion') == 'success'),
         'failed_jobs': sum(1 for j in build_report['jobs'] if j.get('conclusion') == 'failure'),
-        'total_dockerfile_stages': len(all_stages),
-        'slowest_stages': sorted(
-            all_stages,
-            key=lambda x: x.get('duration', 0),
-            reverse=True
-        )[:10],
-        'dockerfile_analysis': dockerfile_analysis
+        'total_dockerfile_stages': len(all_stages)
     }
 
     # Save JSON report
@@ -655,120 +634,73 @@ def generate_html_report(report, output_dir='.'):
                         </tr>
             '''
 
+            # Check if this step has Dockerfile stages (Build and push Docker image step)
+            dockerfile_stages = step.get('dockerfile_stages', [])
+            if dockerfile_stages:
+                # Sort by duration descending (slowest first)
+                dockerfile_stages_sorted = sorted(
+                    dockerfile_stages,
+                    key=lambda x: x.get('duration', 0),
+                    reverse=True
+                )
+
+                job_html += f'''
+                        <tr>
+                            <td colspan="4" style="padding: 0;">
+                                <details style="background: #161b22; border-radius: 6px; margin: 10px 20px; border: 1px solid #30363d;">
+                                    <summary style="cursor: pointer; font-weight: 600; color: #58a6ff; padding: 10px 15px;">
+                                        🔽 Dockerfile Build Stages ({len(dockerfile_stages_sorted)} stages) - Click to expand
+                                    </summary>
+                                    <div style="padding: 15px;">
+                '''
+
+                for stage in dockerfile_stages_sorted:
+                    stage_id = stage.get('stage_id', '#N/A')
+                    stage_info = stage.get('stage_info', '')
+                    stage_cmd = stage.get('command', '')
+                    stage_duration = stage.get('duration_formatted', 'N/A')
+                    instr_type = stage.get('instruction_type', 'OTHER')
+                    instr_detail = stage.get('instruction_detail', '')
+                    platform = stage.get('platform', '')
+
+                    # Add platform badge
+                    platform_badge = ''
+                    if 'amd64' in platform:
+                        platform_badge = '<span class="instruction-type instr-AMD64" style="background: #238636;">amd64</span>'
+                    elif 'arm64' in platform:
+                        platform_badge = '<span class="instruction-type instr-ARM64" style="background: #db6d28;">arm64</span>'
+
+                    job_html += f'''
+                                        <div class="stage-card" style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 15px; margin-bottom: 10px;">
+                                            <div class="stage-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                                                    <span class="stage-id" style="background: #1f6feb; color: #f0f6fc; padding: 2px 8px; border-radius: 4px; font-family: monospace; font-size: 12px;">{stage_id}</span>
+                                                    <span class="instruction-type instr-{instr_type}" style="padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700;">{instr_type}</span>
+                                                    {platform_badge}
+                                                    <span class="stage-info" style="color: #58a6ff; font-size: 13px;">{stage_info}</span>
+                                                </div>
+                                                <span class="stage-duration" style="font-size: 16px; font-weight: 700; color: #7ee787;">{stage_duration}</span>
+                                            </div>
+                                            <div class="stage-command" style="color: #8b949e; font-family: monospace; font-size: 12px; background: #161b22; padding: 8px 12px; border-radius: 4px; overflow-x: auto;">{instr_detail}</div>
+                                        </div>
+                    '''
+
+                job_html += '''
+                                    </div>
+                                </details>
+                            </td>
+                        </tr>
+                '''
+
         job_html += '''
                     </tbody>
                 </table>
             </div>
-        '''
-
-        # Dockerfile Stages - show under "Build and push Docker image" step
-        dockerfile_stages = job.get('dockerfile_stages', [])
-        if dockerfile_stages:
-            job_html += f'''
-            <div class="stages-section" style="margin-top: 20px;">
-                <details style="background: #161b22; border-radius: 6px; padding: 15px; border: 1px solid #30363d;">
-                    <summary style="cursor: pointer; font-weight: 600; color: #58a6ff; margin-bottom: 15px;">
-                        🔽 Dockerfile Build Stages ({len(dockerfile_stages)} stages) - Click to expand
-                    </summary>
-                    <div style="margin-top: 15px;">
-            '''
-
-            for stage in dockerfile_stages:
-                stage_id = stage.get('stage_id', '#N/A')
-                stage_info = stage.get('stage_info', '')
-                stage_cmd = stage.get('command', '')
-                stage_duration = stage.get('duration_formatted', 'N/A')
-                instr_type = stage.get('instruction_type', 'OTHER')
-                instr_detail = stage.get('instruction_detail', '')
-                platform = stage.get('platform', '')
-
-                # Add platform badge
-                platform_badge = ''
-                if 'amd64' in platform:
-                    platform_badge = '<span class="instruction-type instr-AMD64" style="background: #238636;">amd64</span>'
-                elif 'arm64' in platform:
-                    platform_badge = '<span class="instruction-type instr-ARM64" style="background: #db6d28;">arm64</span>'
-
-                job_html += f'''
-                <div class="stage-card" style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 15px; margin-bottom: 10px;">
-                    <div class="stage-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                            <span class="stage-id" style="background: #1f6feb; color: #f0f6fc; padding: 2px 8px; border-radius: 4px; font-family: monospace; font-size: 12px;">{stage_id}</span>
-                            <span class="instruction-type instr-{instr_type}" style="padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700;">{instr_type}</span>
-                            {platform_badge}
-                            <span class="stage-info" style="color: #58a6ff; font-size: 13px;">{stage_info}</span>
-                        </div>
-                        <span class="stage-duration" style="font-size: 16px; font-weight: 700; color: #7ee787;">{stage_duration}</span>
-                    </div>
-                    <div class="stage-command" style="color: #8b949e; font-family: monospace; font-size: 12px; background: #161b22; padding: 8px 12px; border-radius: 4px; overflow-x: auto;">{instr_detail}</div>
-                </div>
-                '''
-
-            job_html += '''
-                    </div>
-                </details>
-            </div>
-            '''
-
-        job_html += '''
         </div>
         '''
         jobs_html += job_html
 
     html = html.replace('{{JOBS_CONTENT}}', jobs_html)
-
-    # Generate Dockerfile instruction summary HTML
-    dockerfile_analysis = report['summary'].get('dockerfile_analysis', {})
-    instruction_summary_html = '<div class="instruction-summary">'
-
-    if dockerfile_analysis:
-        # Sort by total duration (descending)
-        sorted_types = sorted(
-            dockerfile_analysis.items(),
-            key=lambda x: x[1]['total_duration'],
-            reverse=True
-        )
-
-        for instr_type, data in sorted_types:
-            instruction_summary_html += f'''
-            <div class="instr-card">
-                <div class="type"><span class="instruction-type instr-{instr_type}">{instr_type}</span></div>
-                <div class="count">{data['count']} stages</div>
-                <div class="duration">Total: {data['total_duration_formatted']}</div>
-            </div>
-            '''
-
-    instruction_summary_html += '</div>'
-
-    # Handle empty case
-    if not dockerfile_analysis:
-        instruction_summary_html = '<p style="color: #8b949e;">No Dockerfile instruction data available</p>'
-
-    html = html.replace('{{DOCKERFILE_INSTRUCTION_SUMMARY}}', instruction_summary_html)
-
-    # Generate slowest stages HTML
-    slowest = report['summary'].get('slowest_stages', [])
-    slowest_html = ""
-    if slowest:
-        for idx, stage in enumerate(slowest, 1):
-            stage_info = stage.get('stage_info', '')
-            stage_cmd = stage.get('command', '')[:80]
-            stage_duration = stage.get('duration_formatted', 'N/A')
-            instr_type = stage.get('instruction_type', 'OTHER')
-
-            slowest_html += f'''
-            <div class="slowest-item">
-                <div class="slowest-rank">{idx}</div>
-                <div class="slowest-details">
-                    <span class="instruction-type instr-{instr_type}">{instr_type}</span>
-                    <div class="slowest-stage">{stage_info} - {stage_cmd}...</div>
-                </div>
-                <div class="slowest-duration">{stage_duration}</div>
-            </div>
-            '''
-        html = html.replace('{{SLOWEST_STAGES_CONTENT}}', slowest_html)
-    else:
-        html = html.replace('{{SLOWEST_STAGES_CONTENT}}', '<p style="color: #8b949e;">No Dockerfile stages data available</p>')
 
     html_path = os.path.join(output_dir, 'build-report.html')
     with open(html_path, 'w') as f:
