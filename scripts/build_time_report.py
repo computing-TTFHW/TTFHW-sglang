@@ -96,21 +96,21 @@ def parse_dockerfile_log(log_content):
         print(f"      #{sn}: {t:.1f}s")
 
     # Second pass: find the FIRST start line for each stage number
-    # Each stage number appears only once as a start line
+    # Each stage number should appear only once as a start line
     seen_stage_nums = set()
-    for line in lines:
+    for idx, line in enumerate(lines):
         stage_num = None
         bracket = None
         command = None
 
-        # Try bracket pattern first
+        # Try bracket pattern first (this matches lines with [...])
         match = bracket_pattern.search(line)
         if match:
             stage_num = match.group(1)
             bracket = match.group(2).strip()
             command = match.group(3).strip()
         else:
-            # Try simple pattern (no bracket)
+            # Try simple pattern (no bracket) - matches lines like "#34 resolving provenance..."
             match = simple_pattern.search(line)
             if match:
                 stage_num = match.group(1)
@@ -125,6 +125,7 @@ def parse_dockerfile_log(log_content):
 
         # Skip if we already processed this stage number
         if stage_num in seen_stage_nums:
+            print(f"    [SKIP DUP] #{stage_num} at line {idx}: {line[:80]}")
             continue
         seen_stage_nums.add(stage_num)
 
@@ -171,8 +172,12 @@ def parse_dockerfile_log(log_content):
                 'source_line': line[:150]
             }
             bracket_str = f"[{bracket}]" if bracket else ""
-            print(f"    [FOUND] #{stage_num} {bracket_str} {command[:50] if command else ''} -> {duration:.1f}s")
+            print(f"    [FOUND] #{stage_num} {bracket_str} {command[:80] if command else ''} -> {duration:.1f}s")
             stages.append(stage_data)
+        else:
+            # No DONE time found for this stage
+            bracket_str = f"[{bracket}]" if bracket else ""
+            print(f"    [SKIP] #{stage_num} {bracket_str} - No DONE time found")
 
     # Build final list sorted by stage number
     stages.sort(key=lambda x: int(x['stage_id'].replace('#', '')))
@@ -348,7 +353,8 @@ def generate_build_report(gh_token, run_id, repo='', output_dir='.'):
                         print(f"    Found {len(target_files)} log files to check (excluding system logs)")
 
                         # Parse each log file and look for build output
-                        dockerfile_stages = []
+                        # Use dict to deduplicate by stage_num across multiple log files
+                        all_stages_dict = {}
                         for log_filename in target_files:
                             print(f"    ========== Processing log file: {log_filename} ==========")
                             try:
@@ -377,7 +383,13 @@ def generate_build_report(gh_token, run_id, repo='', output_dir='.'):
                                         stages = parse_dockerfile_log(log_content)
                                         if stages:
                                             print(f"      ✓ Parsed {len(stages)} Dockerfile stages")
-                                            dockerfile_stages.extend(stages)
+                                            # Deduplicate by stage_num
+                                            for stage in stages:
+                                                stage_num = stage['stage_id'].replace('#', '')
+                                                if stage_num not in all_stages_dict:
+                                                    all_stages_dict[stage_num] = stage
+                                                else:
+                                                    print(f"      [SKIP] Stage #{stage_num} already exists, skipping duplicate")
                                         else:
                                             print(f"      ✗ No stages parsed (check debug output above)")
                                     else:
@@ -386,6 +398,10 @@ def generate_build_report(gh_token, run_id, repo='', output_dir='.'):
                                 print(f"      Error parsing {log_filename}: {e}")
                                 import traceback
                                 traceback.print_exc()
+
+                        # Convert dict to list
+                        dockerfile_stages = list(all_stages_dict.values())
+                        dockerfile_stages.sort(key=lambda x: int(x['stage_id'].replace('#', '')))
 
                         if dockerfile_stages:
                             # Find the "Build and push Docker image" step
