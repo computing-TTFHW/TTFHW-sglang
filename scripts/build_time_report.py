@@ -57,8 +57,10 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
     Parse Buildkit log to extract Dockerfile stage timings.
 
     Log format:
-    2026-04-10T09:06:50.3871078Z #5 [linux/amd64  1/12] FROM quay.io/ascend/cann:8.5.0-910b...
-    ...
+    2026-04-10T09:06:45.2770303Z #1 [internal] booting buildkit
+    2026-04-10T09:06:48.2219463Z #1 DONE 2.9s
+
+    2026-04-10T09:06:50.3871078Z #5 [linux/amd64  1/12] FROM quay.io/...
     2026-04-10T09:08:37.1662964Z #5 DONE 106.7s
     """
     import re as regex
@@ -67,14 +69,15 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
     lines = log_content.split('\n')
     print(f"    Parsing {len(lines)} lines of log...")
 
-    # Pattern: #5 [linux/amd64  1/12] FROM ...
-    # Match the line format with timestamp prefix
-    stage_pattern = regex.compile(r'#(\d+)\s+\[([a-z0-9/]+)\s+(\d+)/(\d+)\]\s*(\w+)\s*(.*)')
+    # Pattern: timestampZ #N [...] command
+    # e.g., 2026-04-10T09:06:45.2770303Z #1 [linux/amd64  1/12] FROM ...
+    stage_pattern = regex.compile(r'\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+\[([^\]]+)\]\s*(.+)')
 
-    # Pattern for DONE: #5 DONE 106.7s
-    done_pattern = regex.compile(r'#(\d+)\s+DONE\s+(\d+\.\d+s)')
+    # Pattern for DONE: timestampZ #N DONE X.Xs
+    # e.g., 2026-04-10T09:08:37.1662964Z #5 DONE 106.7s
+    done_pattern = regex.compile(r'\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+#(\d+)\s+DONE\s+(\d+\.\d+s)')
 
-    # Track stages by unique key: stage_num + platform
+    # Track stages by stage number
     stage_info = {}
 
     # First pass: find all DONE lines and their times
@@ -85,53 +88,80 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
             stage_num = match.group(1)
             duration_str = match.group(2)
             duration_sec = float(duration_str.replace('s', ''))
-            # Keep updating - the last DONE for each stage_num is the final time
             done_times[stage_num] = duration_sec
-            print(f"    [DONE] Stage #{stage_num}: {duration_sec:.1f}s")
 
     print(f"    Found {len(done_times)} DONE lines")
+    for sn, t in sorted(done_times.items(), key=lambda x: int(x[0])):
+        print(f"      #{sn}: {t:.1f}s")
 
     # Second pass: find all stage start lines
+    seen_keys = set()
     for line in lines:
         match = stage_pattern.search(line)
         if match:
             stage_num = match.group(1)
-            platform = match.group(2).strip()
-            step_num = match.group(3)
-            total_steps = match.group(4)
-            instruction = match.group(5).upper()
-            command = match.group(6)[:100]
+            bracket = match.group(2).strip()  # e.g., "linux/amd64  1/12" or "internal"
+            command = match.group(3).strip()
 
-            # Only process amd64 platform
-            if 'amd64' not in platform:
+            # Extract platform and step info from bracket
+            # Format: "linux/amd64  1/12" or "linux/amd64 1/12" or "internal"
+            step_match = regex.search(r'(\d+)/(\d+)', bracket)
+            if step_match:
+                step_num = step_match.group(1)
+                total_steps = step_match.group(2)
+                platform = bracket[:step_match.start()].strip()
+            else:
+                step_num = None
+                total_steps = None
+                platform = bracket
+
+            # Only process amd64 or non-platform-specific stages
+            if 'amd64' not in platform and 'arm64' not in platform and step_num is None:
+                continue
+
+            # For multi-platform builds, we want amd64 only
+            if 'arm64' in platform:
                 continue
 
             # Skip if we already have this stage
-            key = f"{stage_num}_amd64"
-            if key in stage_info:
+            key = f"{stage_num}_{platform}"
+            if key in seen_keys:
                 continue
+            seen_keys.add(key)
 
             # Get duration from done_times
             duration = done_times.get(stage_num)
 
-            stage_info[key] = {
-                'stage_id': f"#{stage_num}",
-                'platform': platform,
-                'step': f"[{step_num}/{total_steps}]",
-                'instruction_type': instruction,
-                'instruction_detail': command[:80] if command else f"[{step_num}/{total_steps}] {instruction}",
-                'stage_info': platform,
-                'command': command,
-                'duration': duration,
-                'duration_formatted': format_duration(duration) if duration else 'N/A',
-                'source_line': line[:150]
-            }
-            print(f"    [FOUND] #{stage_num} [{step_num}/{total_steps}] {instruction}: {command[:50]}... -> {duration}s" if duration else f"    [FOUND] #{stage_num} [{step_num}/{total_steps}] {instruction}: {command[:50]}... -> NO TIME")
+            # Extract instruction type from command
+            instr_match = regex.match(r'^(\w+)', command)
+            instruction = instr_match.group(1).upper() if instr_match else 'OTHER'
 
-    # Build final list sorted by step number
-    for key in sorted(stage_info.keys(), key=lambda x: int(x.split('_')[0])):
-        if stage_info[key].get('duration') is not None:
-            stages.append(stage_info[key])
+            if duration is not None:
+                stage_info[key] = {
+                    'stage_id': f"#{stage_num}",
+                    'platform': platform,
+                    'step': f"[{step_num}/{total_steps}]" if step_num else '',
+                    'instruction_type': instruction,
+                    'instruction_detail': command[:100],
+                    'stage_info': bracket,
+                    'command': command,
+                    'duration': duration,
+                    'duration_formatted': format_duration(duration),
+                    'source_line': line[:150]
+                }
+                print(f"    [FOUND] #{stage_num} [{bracket}] {instruction} -> {duration:.1f}s")
+
+    # Build final list sorted by step number then stage number
+    def sort_key(k):
+        info = stage_info[k]
+        step = info.get('step', '[0/0]')
+        step_match = regex.search(r'\[?(\d+)/(\d+)\]?', step)
+        if step_match:
+            return (int(step_match.group(1)), int(k.split('_')[0]))
+        return (999, int(k.split('_')[0]))
+
+    for key in sorted(stage_info.keys(), key=sort_key):
+        stages.append(stage_info[key])
 
     print(f"    Final: {len(stages)} stages with timing")
     return stages
