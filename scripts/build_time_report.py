@@ -115,16 +115,10 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
                 total_steps = None
                 platform = bracket
 
-            # Only process amd64 or non-platform-specific stages
-            if 'amd64' not in platform and 'arm64' not in platform and step_num is None:
-                continue
-
-            # For multi-platform builds, we want amd64 only
-            if 'arm64' in platform:
-                continue
+            # Create unique key with platform
+            key = f"{stage_num}_{platform}"
 
             # Skip if we already have this stage
-            key = f"{stage_num}_{platform}"
             if key in seen_keys:
                 continue
             seen_keys.add(key)
@@ -155,10 +149,16 @@ def parse_dockerfile_log(log_content, dockerfile_content=None):
     def sort_key(k):
         info = stage_info[k]
         step = info.get('step', '[0/0]')
-        step_match = regex.search(r'\[?(\d+)/(\d+)\]?', step)
+        step_match = regex.search(r'(\d+)/(\d+)', step)
+        platform = info.get('platform', '')
+        # Sort by step number, then by stage number, amd64 before arm64
         if step_match:
-            return (int(step_match.group(1)), int(k.split('_')[0]))
-        return (999, int(k.split('_')[0]))
+            step_num = int(step_match.group(1))
+        else:
+            step_num = 999
+        stage_num = int(k.split('_')[0])
+        platform_order = 0 if 'amd64' in platform else (1 if 'arm64' in platform else 2)
+        return (step_num, stage_num, platform_order)
 
     for key in sorted(stage_info.keys(), key=sort_key):
         stages.append(stage_info[key])
