@@ -458,13 +458,10 @@ def generate_build_report(gh_token, run_id, repo='', output_dir='.'):
         build_report['jobs'].append(job_info)
 
     # Calculate summary statistics
-    all_stages = [s for j in build_report['jobs'] for s in j.get('dockerfile_stages', [])]
-
     build_report['summary'] = {
         'total_jobs': len(build_report['jobs']),
         'successful_jobs': sum(1 for j in build_report['jobs'] if j.get('conclusion') == 'success'),
-        'failed_jobs': sum(1 for j in build_report['jobs'] if j.get('conclusion') == 'failure'),
-        'total_dockerfile_stages': len(all_stages)
+        'failed_jobs': sum(1 for j in build_report['jobs'] if j.get('conclusion') == 'failure')
     }
 
     # Save JSON report
@@ -506,7 +503,6 @@ def generate_html_report(report, output_dir='.'):
     html = html.replace('{{UPDATED_AT}}', report['updated_at'])
     html = html.replace('{{SUCCESSFUL_JOBS}}', str(report['summary']['successful_jobs']))
     html = html.replace('{{FAILED_JOBS}}', str(report['summary']['failed_jobs']))
-    html = html.replace('{{TOTAL_DOCKERFILE_STAGES}}', str(report['summary']['total_dockerfile_stages']))
     html = html.replace('{{TOTAL_JOBS}}', str(len(report['jobs'])))
 
     # Generate jobs HTML
@@ -560,64 +556,6 @@ def generate_html_report(report, output_dir='.'):
                             <td style="color: #8b949e; font-size: 13px;">{step_started}</td>
                         </tr>
             '''
-
-            # Check if this step has Dockerfile stages (Build and push Docker image step)
-            dockerfile_stages = step.get('dockerfile_stages', [])
-            if dockerfile_stages:
-                # Sort by duration descending (slowest first)
-                dockerfile_stages_sorted = sorted(
-                    dockerfile_stages,
-                    key=lambda x: x.get('duration', 0),
-                    reverse=True
-                )
-
-                job_html += f'''
-                        <tr>
-                            <td colspan="4" style="padding: 0;">
-                                <details style="background: #161b22; border-radius: 6px; margin: 10px 20px; border: 1px solid #30363d;">
-                                    <summary style="cursor: pointer; font-weight: 600; color: #58a6ff; padding: 10px 15px;">
-                                        🔽 Dockerfile Build Stages ({len(dockerfile_stages_sorted)} stages) - Click to expand
-                                    </summary>
-                                    <div style="padding: 15px;">
-                '''
-
-                for stage in dockerfile_stages_sorted:
-                    stage_id = stage.get('stage_id', '#N/A')
-                    stage_info = stage.get('stage_info', '')
-                    stage_cmd = stage.get('command', '')
-                    stage_duration = stage.get('duration_formatted', 'N/A')
-                    instr_type = stage.get('instruction_type', 'OTHER')
-                    instr_detail = stage.get('instruction_detail', '')
-                    platform = stage.get('platform', '')
-
-                    # Add platform badge
-                    platform_badge = ''
-                    if 'amd64' in platform:
-                        platform_badge = '<span class="instruction-type instr-AMD64" style="background: #238636;">amd64</span>'
-                    elif 'arm64' in platform:
-                        platform_badge = '<span class="instruction-type instr-ARM64" style="background: #db6d28;">arm64</span>'
-
-                    job_html += f'''
-                                        <div class="stage-card" style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 15px; margin-bottom: 10px;">
-                                            <div class="stage-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                                                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                                                    <span class="stage-id" style="background: #1f6feb; color: #f0f6fc; padding: 2px 8px; border-radius: 4px; font-family: monospace; font-size: 12px;">{stage_id}</span>
-                                                    <span class="instruction-type instr-{instr_type}" style="padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700;">{instr_type}</span>
-                                                    {platform_badge}
-                                                    <span class="stage-info" style="color: #58a6ff; font-size: 13px;">{stage_info}</span>
-                                                </div>
-                                                <span class="stage-duration" style="font-size: 16px; font-weight: 700; color: #7ee787;">{stage_duration}</span>
-                                            </div>
-                                            <div class="stage-command" style="color: #8b949e; font-family: monospace; font-size: 12px; background: #161b22; padding: 8px 12px; border-radius: 4px; overflow-x: auto;">{instr_detail}</div>
-                                        </div>
-                    '''
-
-                job_html += '''
-                                    </div>
-                                </details>
-                            </td>
-                        </tr>
-                '''
 
         job_html += '''
                     </tbody>
